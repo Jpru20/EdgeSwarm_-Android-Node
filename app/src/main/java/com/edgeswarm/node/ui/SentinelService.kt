@@ -1,4 +1,4 @@
-package com.edgeswarm.node
+﻿package com.edgeswarm.node
 
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -40,13 +40,13 @@ class SentinelService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private val serviceScope = CoroutineScope(Dispatchers.IO + Job())
     private var slmEngine: LlmInference? = null
-    private var lastEngineError = "Engine never initialized." // 🚨 Stores the exact crash reason
+    private var lastEngineError = "Engine never initialized." // ðŸš¨ Stores the exact crash reason
 
     private val gcpBaseUrl = "https://api.edgeswarm.io"
     private val gcpUploadUrl = "https://api.edgeswarm.io/enterprise/submit-result"
     private val gcpJobsUrl = "$gcpBaseUrl/swarm/get-jobs"
 
-    // 🚨 Production Timeout rules for deep scraping tasks
+    // ðŸš¨ Production Timeout rules for deep scraping tasks
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(60, TimeUnit.SECONDS)
         .writeTimeout(60, TimeUnit.SECONDS)
@@ -73,7 +73,7 @@ class SentinelService : Service() {
         wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "EdgeSwarm::CpuWakeLock").apply { acquire() }
 
         isServiceRunning = true
-        // 🚨 Restored your UI Routing Switches
+        // ðŸš¨ Restored your UI Routing Switches
         startHeadlessEngine(
             intent?.getStringExtra("USER_EMAIL") ?: "mobile_node@edgeswarm.com",
             intent?.getBooleanExtra("ALLOW_COMPUTE", true) ?: true,
@@ -96,8 +96,8 @@ class SentinelService : Service() {
         serviceScope.launch {
             var interpreter: Interpreter? = null
             try {
-                // 🚨 Restored all original verbose logging
-                Log.d("EdgeSwarm", "🚀 Headless Engine Booting (CPU Mode)...")
+                // ðŸš¨ Restored all original verbose logging
+                Log.d("EdgeSwarm", "ðŸš€ Headless Engine Booting (CPU Mode)...")
                 interpreter = initTFLiteInterpreter()
                 if (allowSlm) slmEngine = initSlmEngine()
 
@@ -111,16 +111,16 @@ class SentinelService : Service() {
                         val prompt = task.getString("prompt")
                         val bounty = task.getDouble("bounty")
 
-                        Log.d("EdgeSwarm", "📥 Loop Check -> Task ID: $taskId | Prompt: \"$prompt\"")
+                        Log.d("EdgeSwarm", "ðŸ“¥ Loop Check -> Task ID: $taskId | Prompt: \"$prompt\"")
 
                         var aiOutput = ""
                         var isError = false
                         val start = System.currentTimeMillis()
 
-                        // 🚨 BULLETPROOF TASK ROUTING AND ERROR HANDLING
+                        // ðŸš¨ BULLETPROOF TASK ROUTING AND ERROR HANDLING
                         try {
                             if (prompt.startsWith("compute://") && allowCompute) {
-                                Log.d("EdgeSwarm", "⚙️ Executing Tensor Math...")
+                                Log.d("EdgeSwarm", "âš™ï¸ Executing Tensor Math...")
                                 val buffer = ByteBuffer.allocate(1000 * 4) // 1000 floats
                                 buffer.order(ByteOrder.LITTLE_ENDIAN) // Force matching byte order for server
                                 for (i in 0 until 1000) {
@@ -129,7 +129,7 @@ class SentinelService : Service() {
                                 aiOutput = Base64.encodeToString(buffer.array(), Base64.NO_WRAP)
 
                             } else if (prompt.startsWith("http") && allowScraping) {
-                                Log.d("EdgeSwarm", "🌐 Executing Professional Scrape...")
+                                Log.d("EdgeSwarm", "ðŸŒ Executing Professional Scrape...")
 
                                 val request = Request.Builder()
                                     .url(prompt)
@@ -146,7 +146,7 @@ class SentinelService : Service() {
 
                                 val response = httpClient.newCall(request).execute()
 
-                                // 🚨 FIX: Production-grade validation
+                                // ðŸš¨ FIX: Production-grade validation
                                 if (!response.isSuccessful) {
                                     throw Exception("Scrape Failed: HTTP ${response.code}")
                                 }
@@ -198,14 +198,14 @@ class SentinelService : Service() {
                                     val cleanPrompt = prompt.replace("prompt://", "")
                                     aiOutput = slmEngine!!.generateResponse(cleanPrompt)
                                 } else {
-                                    // 🚨 NEW: Sends the real reason directly to the server
+                                    // ðŸš¨ NEW: Sends the real reason directly to the server
                                     throw Exception("SLM Offline. Reason: $lastEngineError")
                                 }
                             } else {
                                 throw Exception("All routing switches disabled.")
                             }
                         } catch (e: Exception) {
-                            Log.e("EdgeSwarm", "⚠️ Task Execution Crashed", e)
+                            Log.e("EdgeSwarm", "âš ï¸ Task Execution Crashed", e)
                             aiOutput = "Execution Failed: ${e.message}"
                             isError = true // Mark as error so server unlocks it immediately
                         }
@@ -243,16 +243,16 @@ class SentinelService : Service() {
         val modelName = "gemma-2b-it-cpu-int4.bin"
         val file = File(applicationContext.filesDir, modelName)
 
-        // 🚨 1. INTEGRITY CHECK: Gemma is roughly 1.4GB. If the file is smaller than 1GB, it's corrupted.
+        // ðŸš¨ 1. INTEGRITY CHECK: Gemma is roughly 1.4GB. If the file is smaller than 1GB, it's corrupted.
         if (file.exists() && file.length() < 1000000000L) {
-            Log.w("EdgeSwarm", "⚠️ Corrupted model detected (Size: ${file.length()} bytes). Wiping...")
+            Log.w("EdgeSwarm", "âš ï¸ Corrupted model detected (Size: ${file.length()} bytes). Wiping...")
             file.delete()
         }
 
-        // 🚨 2. SAFE CHUNKED COPY
+        // ðŸš¨ 2. SAFE CHUNKED COPY
         if (!file.exists()) {
             try {
-                Log.d("EdgeSwarm", "🧠 Unpacking 1.5GB Gemma Model... DO NOT CLOSE APP. This takes 1-2 minutes.")
+                Log.d("EdgeSwarm", "ðŸ§  Unpacking 1.5GB Gemma Model... DO NOT CLOSE APP. This takes 1-2 minutes.")
                 applicationContext.assets.open(modelName).use { input ->
                     file.outputStream().use { output ->
                         // Use a 4MB buffer to prevent Android from Out-Of-Memory crashing the app
@@ -266,12 +266,12 @@ class SentinelService : Service() {
 
                             // Log progress to the console every ~100MB so you know it's working
                             if (totalRead % (100 * 1024 * 1024) < (4 * 1024 * 1024)) {
-                                Log.d("EdgeSwarm", "⏳ Copied ${totalRead / (1024 * 1024)} MB...")
+                                Log.d("EdgeSwarm", "â³ Copied ${totalRead / (1024 * 1024)} MB...")
                             }
                         }
                     }
                 }
-                Log.d("EdgeSwarm", "✅ Model Unpack Complete! Final Size: ${file.length() / (1024 * 1024)} MB")
+                Log.d("EdgeSwarm", "âœ… Model Unpack Complete! Final Size: ${file.length() / (1024 * 1024)} MB")
             } catch (e: Exception) {
                 Log.e("EdgeSwarm", "Model Copy Failed", e)
                 file.delete() // Wipe the partial file so it tries again next time
@@ -279,7 +279,7 @@ class SentinelService : Service() {
             }
         }
 
-        // 🚨 3. BOOT THE ENGINE
+        // ðŸš¨ 3. BOOT THE ENGINE
         return try {
             val options = LlmInferenceOptions.builder()
                 .setModelPath(file.absolutePath)
@@ -287,11 +287,11 @@ class SentinelService : Service() {
                 .build()
             LlmInference.createFromOptions(applicationContext, options)
         } catch (e: Exception) {
-            // 🚨 NEW: Save the exact MediaPipe error so the server can see it!
+            // ðŸš¨ NEW: Save the exact MediaPipe error so the server can see it!
             lastEngineError = e.stackTraceToString().take(200)
             null
         }
-    } // 🚨 RESTORED MISSING BRACKET HERE
+    } // ðŸš¨ RESTORED MISSING BRACKET HERE
 
     private fun getOrCreateNodeCredentials(email: String): Credentials {
         val prefs = getSharedPreferences("EdgeSwarmNode", MODE_PRIVATE)
@@ -302,7 +302,7 @@ class SentinelService : Service() {
             val ecKeyPair = Keys.createEcKeyPair()
             privateKeyHex = ecKeyPair.privateKey.toString(16)
             prefs.edit().putString(keyName, privateKeyHex).commit()
-            Log.d("EdgeSwarm", "🔑 New Wallet Generated & Locked for $email.")
+            Log.d("EdgeSwarm", "ðŸ”‘ New Wallet Generated & Locked for $email.")
         }
 
         return Credentials.create(privateKeyHex)
@@ -326,7 +326,7 @@ class SentinelService : Service() {
             sigBytes[64] = vVal.toByte()
 
             val finalSig = "0x" + Numeric.toHexStringNoPrefix(sigBytes)
-            Log.d("EdgeSwarm", "🔐 Signed Exact Server String: $finalSig")
+            Log.d("EdgeSwarm", "ðŸ” Signed Exact Server String: $finalSig")
 
             finalSig
         } catch (e: Exception) {
@@ -350,7 +350,7 @@ class SentinelService : Service() {
         return try {
             val nodeCredentials = getOrCreateNodeCredentials(workerEmail)
 
-            // 🚨 ENFORCE UTF-8 TO PREVENT HASHING COLLISION
+            // ðŸš¨ ENFORCE UTF-8 TO PREVENT HASHING COLLISION
             val digest = java.security.MessageDigest.getInstance("SHA-256")
             val hashBytes = digest.digest(aiOutput.toByteArray(Charsets.UTF_8))
             val properFileHash = Numeric.toHexStringNoPrefix(hashBytes)
@@ -428,3 +428,4 @@ class SentinelService : Service() {
         } catch (e: Exception) { null }
     }
 }
+

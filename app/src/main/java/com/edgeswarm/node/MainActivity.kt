@@ -1,4 +1,4 @@
-package com.edgeswarm.node
+﻿package com.edgeswarm.node
 
 import android.Manifest
 import android.content.Intent
@@ -72,8 +72,8 @@ data class LedgeItem(
 )
 
 val supabase = createSupabaseClient(
-    supabaseUrl = "https://jeljtktckhiqtmxsqmju.supabase.co",
-    supabaseKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplbGp0a3Rja2hpcXRteHNxbWp1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg5OTMxNjEsImV4cCI6MjA5NDU2OTE2MX0.f4WmXbRcQpR2v-SkYAwok_U4L1cBEfxjrqgVloSBMlQ"
+    supabaseUrl = "https://xrmwmoqgukjztboemvgi.supabase.co",
+    supabaseKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhybXdtb3FndWtqenRib2VtdmdpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk3MzgzNDcsImV4cCI6MjA5NTMxNDM0N30.3kP1uRFgRAgr2L2eh3Su36icRUHMEsfYIJc1RBV1jjM"
 ) {
     install(Auth)
     install(Postgrest)
@@ -184,14 +184,14 @@ class MainActivity : ComponentActivity() {
         }
 
         try {
-            Log.d("EdgeSwarm", "☁️ Searching Cloud for existing wallet...")
+            Log.d("EdgeSwarm", "â˜ï¸ Searching Cloud for existing wallet...")
             val result = supabase.postgrest["worker_wallets"]
                 .select { filter { eq("email", email) } }
                 .decodeSingleOrNull<WorkerWallet>()
 
             if (result != null) {
                 nodePrefs.edit().putString(keyName, result.private_key).apply()
-                Log.d("EdgeSwarm", "☁️ Success: Wallet downloaded from Cloud for $email")
+                Log.d("EdgeSwarm", "â˜ï¸ Success: Wallet downloaded from Cloud for $email")
             } else {
                 val ecKeyPair = try {
                     Keys.createEcKeyPair()
@@ -205,7 +205,7 @@ class MainActivity : ComponentActivity() {
 
                 val newWallet = WorkerWallet(email, newPrivateKey)
                 supabase.postgrest["worker_wallets"].insert(newWallet)
-                Log.d("EdgeSwarm", "☁️ Success: New Wallet generated and backed up to Cloud for $email")
+                Log.d("EdgeSwarm", "â˜ï¸ Success: New Wallet generated and backed up to Cloud for $email")
             }
         } catch (e: Exception) {
             Log.e("EdgeSwarm", "Cloud Sync Failed: ${e.message}")
@@ -291,7 +291,7 @@ fun LoginPortalScreen(onAuthSuccess: (String) -> Unit) {
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                 trailingIcon = {
                     IconButton(onClick = { isPasswordVisible = !isPasswordVisible }) {
-                        Text(if (isPasswordVisible) "🙈" else "👁", fontSize = 18.sp)
+                        Text(if (isPasswordVisible) "ðŸ™ˆ" else "ðŸ‘", fontSize = 18.sp)
                     }
                 },
                 colors = OutlinedTextFieldDefaults.colors(
@@ -350,7 +350,7 @@ fun LoginPortalScreen(onAuthSuccess: (String) -> Unit) {
                                     statusMsg = "MFA Challenge Initiated."
                                 } else {
                                     withContext(Dispatchers.IO) { supabase.auth.signOut() }
-                                    statusMsg = "⚠️ Setup 2FA on the Web Console first."
+                                    statusMsg = "âš ï¸ Setup 2FA on the Web Console first."
                                 }
                             } else {
                                 onAuthSuccess(inputEmail.trim())
@@ -378,7 +378,7 @@ fun LoginPortalScreen(onAuthSuccess: (String) -> Unit) {
 
         if (statusMsg.isNotEmpty()) {
             Spacer(modifier = Modifier.height(24.dp))
-            Text(statusMsg, color = if (statusMsg.contains("⚠️") || statusMsg.contains("Denied")) Color.Red else Color(0xFF00FFCC), fontSize = 13.sp, textAlign = TextAlign.Center)
+            Text(statusMsg, color = if (statusMsg.contains("âš ï¸") || statusMsg.contains("Denied")) Color.Red else Color(0xFF00FFCC), fontSize = 13.sp, textAlign = TextAlign.Center)
         }
     }
 }
@@ -465,7 +465,7 @@ fun TokenDashboard(balance: String, usd: String, isSyncing: Boolean, onSync: () 
     Column(modifier = Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
         Text("SWARM SYSTEM BALANCE", color = Color.Gray, fontSize = 12.sp, fontWeight = FontWeight.Bold)
         Text(text = if(isSyncing) "SYNCING..." else "$balance SWM", fontSize = 48.sp, fontWeight = FontWeight.Black, color = Color.White)
-        Text(text = "≈ $$usd USD", color = Color(0xFF00FFCC), fontSize = 18.sp)
+        Text(text = "â‰ˆ $$usd USD", color = Color(0xFF00FFCC), fontSize = 18.sp)
         Spacer(modifier = Modifier.height(40.dp))
         Button(onClick = onSync, modifier = Modifier.fillMaxWidth().height(56.dp), shape = RoundedCornerShape(8.dp), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E2329))) {
             Text("SYNC LEDGER DATA", fontWeight = FontWeight.Bold)
@@ -550,7 +550,8 @@ fun SentinelScreen(userEmail: String) {
             shape = RoundedCornerShape(16.dp),
             colors = ButtonDefaults.buttonColors(containerColor = if (isRunning) Color(0xFFE53935) else Color(0xFF1E2329))
         ) {
-            Text(text = if (isRunning) "● STOP HEADLESS NODE" else "ACTIVATE HEADLESS MODE", fontWeight = FontWeight.ExtraBold)
+            Text(text = if (isRunning) "â— STOP HEADLESS NODE" else "ACTIVATE HEADLESS MODE", fontWeight = FontWeight.ExtraBold)
         }
     }
 }
+
