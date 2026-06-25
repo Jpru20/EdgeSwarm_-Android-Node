@@ -1,4 +1,4 @@
-plugins {
+﻿plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
@@ -10,6 +10,7 @@ android {
     compileSdk = 35
 
     defaultConfig {
+        buildConfigField("long", "PLAY_INTEGRITY_CLOUD_PROJECT_NUMBER", "0L")
         applicationId = "com.edgeswarm.node"
         minSdk = 26
         targetSdk = 35
@@ -37,10 +38,11 @@ android {
     }
 
     buildFeatures {
+        buildConfig = true
         compose = true
     }
 
-    // 🚨 FIX: Used the correct Kotlin '+=' syntax to prevent sync errors
+    // ðŸš¨ FIX: Used the correct Kotlin '+=' syntax to prevent sync errors
     androidResources {
         noCompress += "bin"
         noCompress += "tflite"
@@ -63,6 +65,8 @@ android {
 }
 
 dependencies {
+    implementation("com.google.android.gms:play-services-tasks:18.2.0")
+    implementation("com.google.android.play:integrity:1.4.0")
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
     implementation("androidx.activity:activity-compose:1.8.2")
@@ -87,10 +91,11 @@ dependencies {
     implementation(platform("io.github.jan-tennert.supabase:bom:3.0.1"))
     implementation("io.github.jan-tennert.supabase:auth-kt")
 
-    // 🚨 FIX: Removed the duplicate postgrest-kt line. The BOM handles versions!
+    // ðŸš¨ FIX: Removed the duplicate postgrest-kt line. The BOM handles versions!
     implementation("io.github.jan-tennert.supabase:postgrest-kt")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
 
     // Ktor Engine (Required for Supabase networking)
     implementation("io.ktor:ktor-client-okhttp:3.0.0")
 }
+
