@@ -873,7 +873,6 @@ class SentinelService : Service() {
 
             val builder = IntegrityTokenRequest.builder()
                 .setNonce(playIntegrityNonce)
-                .setCloudProjectNumber(BuildConfig.PLAY_INTEGRITY_CLOUD_PROJECT_NUMBER)
 
             val response = Tasks.await(
                 integrityManager.requestIntegrityToken(builder.build()),
@@ -1205,7 +1204,6 @@ private fun initLocalNeuralRuntimeDisabled(): Boolean {
     }
 
 }
-
 
 
 
