@@ -272,53 +272,50 @@ class MainActivity : ComponentActivity() {
     private suspend fun fetchCloudServerBalance(walletAddress: String, email: String): Double =
         withContext(Dispatchers.IO) {
             val client = OkHttpClient()
-
-            val encodedWorker = encodeUrl(walletAddress)
             val encodedEmail = encodeUrl(email)
 
-            val candidateUrls = listOf(
-                "$API_BASE_URL/swarm/balance?worker=$encodedWorker",
-                "$API_BASE_URL/swarm/balance?wallet=$encodedWorker",
-                "$API_BASE_URL/swarm/balance?providerEmail=$encodedEmail",
-                "$API_BASE_URL/v1/provider/balance?providerEmail=$encodedEmail"
-            )
+            // Source of truth: proof ledger endpoint.
+            // This returns balance, tokenSummary, and recent proofs from proof_ledger.
+            val url = "$API_BASE_URL/v1/provider/ledge?providerEmail=$encodedEmail&limit=20&t=${System.currentTimeMillis()}"
 
-            var lastValue = 0.0
+            try {
+                Log.d("EdgeSwarm", "Refreshing proof ledger balance from: $url")
 
-            for (url in candidateUrls) {
-                try {
-                    val request = Request.Builder().url(url).build()
+                val request = Request.Builder()
+                    .url(url)
+                    .header("Cache-Control", "no-cache")
+                    .build()
 
-                    client.newCall(request).execute().use { response ->
-                        if (!response.isSuccessful) return@use
+                client.newCall(request).execute().use { response ->
+                    val body = response.body?.string() ?: "{}"
 
-                        val body = response.body?.string() ?: "{}"
-                        val json = JSONObject(body)
-
-                        val parsed = json.firstDoubleOrNull(
-                            "balance",
-                            "swarmBalance",
-                            "swmBalance",
-                            "totalBalance",
-                            "total",
-                            "amount",
-                            "tokens",
-                            "earned"
-                        )
-
-                        if (parsed != null) {
-                            lastValue = parsed
-                            if (parsed > 0.0) {
-                                return@withContext parsed
-                            }
-                        }
+                    if (!response.isSuccessful) {
+                        Log.w("EdgeSwarm", "Proof ledger balance failed: HTTP ${response.code} - $body")
+                        return@withContext 0.0
                     }
-                } catch (e: Exception) {
-                    Log.w("EdgeSwarm", "Balance endpoint failed: $url", e)
-                }
-            }
 
-            return@withContext lastValue
+                    val json = JSONObject(body)
+
+                    val balance = json.optDouble("balance", Double.NaN)
+                    if (!balance.isNaN()) {
+                        Log.d("EdgeSwarm", "Proof ledger balance synced: $balance SWM")
+                        return@withContext balance
+                    }
+
+                    val tokenSummary = json.optJSONObject("tokenSummary")
+                    val totalEarned = tokenSummary?.optDouble("totalEarnedSwarm", Double.NaN) ?: Double.NaN
+                    if (!totalEarned.isNaN()) {
+                        Log.d("EdgeSwarm", "Proof ledger tokenSummary synced: $totalEarned SWM")
+                        return@withContext totalEarned
+                    }
+
+                    Log.w("EdgeSwarm", "Proof ledger balance response missing balance fields: $body")
+                    return@withContext 0.0
+                }
+            } catch (e: Exception) {
+                Log.w("EdgeSwarm", "Proof ledger balance sync failed", e)
+                return@withContext 0.0
+            }
         }
 
     private fun checkRequiredPermissions() {
@@ -1145,6 +1142,7 @@ private fun extractJsonArray(body: String): JSONArray {
 
     return JSONArray()
 }
+
 
 
 

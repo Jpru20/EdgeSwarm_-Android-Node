@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item
+        android:gravity="center"
+        android:width="44dp"
+        android:height="44dp">
+        <bitmap
+            android:src="@drawable/ic_launcher_foreground_padded"
+            android:gravity="center"
+            android:antialias="true"
+            android:filter="true" />
+    </item>
+</layer-list>
