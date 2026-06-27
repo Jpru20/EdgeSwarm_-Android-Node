@@ -14,13 +14,22 @@ android {
         applicationId = "com.edgeswarm.node"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 158
+        versionName = "1.5.8"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+    signingConfigs {
+        create("release") {
+            storeFile = rootProject.file(System.getenv("EDGESWARM_UPLOAD_KEYSTORE") ?: "keys/edgeswarm-upload-key.jks")
+            storePassword = System.getenv("EDGESWARM_UPLOAD_STORE_PASSWORD") ?: ""
+            keyAlias = System.getenv("EDGESWARM_UPLOAD_KEY_ALIAS") ?: "edgeswarm-upload"
+            keyPassword = System.getenv("EDGESWARM_UPLOAD_KEY_PASSWORD") ?: ""
+        }
     }
 
     buildTypes {
         release {
+            signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
@@ -65,7 +74,9 @@ android {
 }
 
 dependencies {
-    implementation("com.google.android.gms:play-services-tasks:18.2.0")
+    
+    implementation("androidx.fragment:fragment-ktx:1.8.9")
+implementation("com.google.android.gms:play-services-tasks:18.2.0")
     implementation("com.google.android.play:integrity:1.4.0")
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
@@ -98,5 +109,9 @@ dependencies {
     // Ktor Engine (Required for Supabase networking)
     implementation("io.ktor:ktor-client-okhttp:3.0.0")
 }
+
+
+
+
 
 

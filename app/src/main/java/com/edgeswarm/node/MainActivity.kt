@@ -897,7 +897,7 @@ fun SentinelScreen(userEmail: String) {
         )
 
         Text(
-            text = "APP VERSION: v1.5.7",
+            text = "APP VERSION: v1.5.8",
             color = Color(0xFF00FFCC),
             fontSize = 11.sp,
             modifier = Modifier.padding(top = 4.dp),
@@ -1142,6 +1142,7 @@ private fun extractJsonArray(body: String): JSONArray {
 
     return JSONArray()
 }
+
 
 
 

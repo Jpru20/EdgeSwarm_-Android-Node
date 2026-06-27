@@ -13,3 +13,14 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+# Android release signing secrets
+keys/
+*.jks
+*.keystore
+
+# Local model assets removed from Android Level 1 build
+excluded-playstore-assets/
+
+# Android build outputs
+app/build/
