@@ -24,3 +24,23 @@ excluded-playstore-assets/
 
 # Android build outputs
 app/build/
+
+# Local EdgeSwarm Android patch/backup files
+*.backup*
+*.bak*
+patch_*.py
+
+# Android build/release outputs
+.gradle/
+build/
+app/build/
+*.apk
+*.aab
+local.properties
+
+# Signing material
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.key

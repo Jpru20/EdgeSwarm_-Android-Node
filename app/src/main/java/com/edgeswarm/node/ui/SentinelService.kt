@@ -62,7 +62,7 @@ class SentinelService : Service() {
     private val serviceScope = CoroutineScope(Dispatchers.IO + Job())
     private var lastEngineError = "Engine never initialized."
 
-    private val appVersion = "1.5.7"
+    private val appVersion = com.edgeswarm.node.BuildConfig.VERSION_NAME
     private val appType = "android"
     private val androidConcurrencyLimit = 3
     private val pollIntervalMs = 2_000L
@@ -180,9 +180,8 @@ class SentinelService : Service() {
         try {
             if (nodeHeartbeatKey.isBlank()) return
 
-            if (nodeWalletAddress.isNullOrBlank()) {
-                nodeWalletAddress = getOrCreateNodeCredentials(providerEmail, userPass).address
-            }
+            val heartbeatWalletAddress = getOrCreateNodeCredentials(providerEmail, userPass).address
+            nodeWalletAddress = heartbeatWalletAddress
 
             val batteryInfo = getBatteryInfoForHeartbeat()
 
@@ -229,7 +228,7 @@ class SentinelService : Service() {
 
             val payload = JSONObject()
                 .put("hardwareId", hardwareId)
-                .put("worker", nodeWalletAddress ?: JSONObject.NULL)
+                .put("worker", heartbeatWalletAddress)
                 .put("providerEmail", providerEmail)
                 .put("nodeType", "android")
                 .put("platform", "Android")
@@ -260,6 +259,8 @@ class SentinelService : Service() {
                 .put("isCharging", batteryInfo.first ?: JSONObject.NULL)
                 .put("batteryPct", batteryInfo.second ?: JSONObject.NULL)
                 .put("batteryTempC", batteryTempCForNeural ?: JSONObject.NULL)
+
+            Log.d("EdgeSwarm", "ANDROID_HEARTBEAT_IDENTITY_V1 ${payload.toString()}")
 
             val body = payload.toString().toRequestBody("application/json".toMediaType())
 
@@ -495,7 +496,127 @@ class SentinelService : Service() {
         }
     }
 
+
+    private fun extractLabeledMatrix(prompt: String, label: String): JSONArray? {
+        return try {
+            val clean = prompt.replace("compute://", "").trim()
+            val labelRegex = Regex("\\b" + Regex.escape(label) + "\\s*=", RegexOption.IGNORE_CASE)
+            val match = labelRegex.find(clean) ?: return null
+
+            val start = clean.indexOf("[", match.range.last + 1)
+            if (start < 0) return null
+
+            var depth = 0
+            var end = -1
+
+            for (idx in start until clean.length) {
+                when (clean[idx]) {
+                    '[' -> depth += 1
+                    ']' -> {
+                        depth -= 1
+                        if (depth == 0) {
+                            end = idx + 1
+                            break
+                        }
+                    }
+                }
+            }
+
+            if (end <= start) return null
+
+            val raw = clean.substring(start, end)
+            val matrix = JSONArray(raw)
+
+            if (matrix.length() == 0) return null
+
+            val width = matrix.getJSONArray(0).length()
+            if (width == 0) return null
+
+            for (i in 0 until matrix.length()) {
+                val row = matrix.getJSONArray(i)
+                if (row.length() != width) return null
+
+                for (j in 0 until row.length()) {
+                    row.getDouble(j)
+                }
+            }
+
+            matrix
+        } catch (e: Exception) {
+            Log.w("EdgeSwarm", "[COMPUTE] Matrix parse failed for label $label: ${e.message}")
+            null
+        }
+    }
+
+    private fun normalizedNumberForJson(value: Double): Any {
+        val roundedInt = Math.rint(value)
+
+        return if (Math.abs(value - roundedInt) < 0.000000001) {
+            roundedInt.toLong()
+        } else {
+            Math.round(value * 100000000.0) / 100000000.0
+        }
+    }
+
+    private fun tryUserMatrixMultiply(prompt: String): String? {
+        return try {
+            val matrixA = extractLabeledMatrix(prompt, "A") ?: return null
+            val matrixB = extractLabeledMatrix(prompt, "B") ?: return null
+
+            val rowsA = matrixA.length()
+            val colsA = matrixA.getJSONArray(0).length()
+            val rowsB = matrixB.length()
+            val colsB = matrixB.getJSONArray(0).length()
+
+            if (colsA != rowsB) {
+                return JSONObject()
+                    .put("error", "invalid_matrix_dimensions")
+                    .put("message", "A columns ($colsA) must equal B rows ($rowsB).")
+                    .toString()
+            }
+
+            if (rowsA > 100 || colsA > 100 || rowsB > 100 || colsB > 100) {
+                return JSONObject()
+                    .put("error", "matrix_too_large")
+                    .put("message", "User-supplied matrix multiply is capped at 100x100.")
+                    .toString()
+            }
+
+            val result = JSONArray()
+
+            for (i in 0 until rowsA) {
+                val resultRow = JSONArray()
+
+                for (j in 0 until colsB) {
+                    var total = 0.0
+
+                    for (k in 0 until colsA) {
+                        total += matrixA.getJSONArray(i).getDouble(k) * matrixB.getJSONArray(k).getDouble(j)
+                    }
+
+                    resultRow.put(normalizedNumberForJson(total))
+                }
+
+                result.put(resultRow)
+            }
+
+            JSONObject()
+                .put("response", result)
+                .toString()
+        } catch (e: Exception) {
+            Log.w("EdgeSwarm", "[COMPUTE] User matrix multiply failed: ${e.message}")
+            null
+        }
+    }
+
+
     private fun runDeterministicCompute(prompt: String, checkpointIndicesJson: JSONArray? = null): String {
+        val userMatrixOutput = tryUserMatrixMultiply(prompt)
+        if (userMatrixOutput != null) {
+            Log.d("EdgeSwarm", "[COMPUTE] Completed user-supplied matrix multiply.")
+            return userMatrixOutput
+        }
+
         val sizeRegex = Regex("(\\d+)x\\1")
         val explicitSizeRegex = Regex("size\\s*=\\s*(\\d+)", RegexOption.IGNORE_CASE)
 
@@ -1205,6 +1326,8 @@ private fun initLocalNeuralRuntimeDisabled(): Boolean {
     }
 
 }
+
+
 
 
 
