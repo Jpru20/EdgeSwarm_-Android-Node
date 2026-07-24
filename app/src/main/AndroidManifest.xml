@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
@@ -10,13 +10,10 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
-    <uses-permission android:name="android.permission.CAMERA" />
-    <uses-feature android:name="android.hardware.camera" />
 
     <application
         android:name=".EdgeSwarmApplication"
-        android:extractNativeLibs="false"
-        android:usesCleartextTraffic="true"
+        android:usesCleartextTraffic="false"
         android:allowBackup="false"
         android:fullBackupContent="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -39,8 +36,9 @@
 
         <service
             android:name=".SentinelService"
+            android:exported="false"
             android:foregroundServiceType="dataSync"
-            android:exported="false" />
+            android:stopWithTask="false" />
 
         <provider
             android:name="androidx.startup.InitializationProvider"

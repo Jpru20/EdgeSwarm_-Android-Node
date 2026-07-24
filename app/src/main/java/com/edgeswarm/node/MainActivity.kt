@@ -1,4 +1,4 @@
-﻿package com.edgeswarm.node
+package com.edgeswarm.node
 
 import android.Manifest
 import android.content.Intent
@@ -11,6 +11,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -22,6 +24,7 @@ import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -58,7 +61,7 @@ import java.net.URLEncoder
 import java.util.Locale
 
 private const val SWARM_REFERENCE_USD = 0.10
-private const val API_BASE_URL = "https://api.edgeswarm.io"
+private val API_BASE_URL = EdgeSwarmConfig.apiBaseUrl
 
 @Serializable
 data class WorkerWallet(
@@ -76,8 +79,8 @@ data class LedgeItem(
 )
 
 val supabase = createSupabaseClient(
-    supabaseUrl = "https://xrmwmoqgukjztboemvgi.supabase.co",
-    supabaseKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhybXdtb3FndWtqenRib2VtdmdpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk3MzgzNDcsImV4cCI6MjA5NTMxNDM0N30.3kP1uRFgRAgr2L2eh3Su36icRUHMEsfYIJc1RBV1jjM"
+    supabaseUrl = EdgeSwarmConfig.supabaseUrl,
+    supabaseKey = EdgeSwarmConfig.supabaseAnonKey
 ) {
     install(Auth)
     install(Postgrest)
@@ -111,7 +114,10 @@ class MainActivity : ComponentActivity() {
 
             LaunchedEffect(isLoggedIn, authenticatedUserEmail) {
                 if (isLoggedIn && authenticatedUserEmail.isNotEmpty()) {
-                    syncWalletKey(authenticatedUserEmail, sharedPrefs)
+                    val walletReady = syncWalletKey(authenticatedUserEmail)
+                    if (!walletReady) {
+                        Log.w("EdgeSwarm", "Wallet sync is not ready for $authenticatedUserEmail")
+                    }
 
                     val cachedBalance = sharedPrefs.getString("balance", "0.00") ?: "0.00"
                     if (cachedBalance == "0.00") {
@@ -132,7 +138,15 @@ class MainActivity : ComponentActivity() {
                             scope.launch {
                                 Toast.makeText(context, "Syncing secure wallet...", Toast.LENGTH_SHORT).show()
 
-                                syncWalletKey(verifiedEmail, sharedPrefs)
+                                val walletReady = syncWalletKey(verifiedEmail)
+                                if (!walletReady) {
+                                    Toast.makeText(
+                                        context,
+                                        "Login succeeded, but wallet provisioning failed. Please try again.",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                    return@launch
+                                }
 
                                 authenticatedUserEmail = verifiedEmail
                                 isLoggedIn = true
@@ -190,7 +204,39 @@ class MainActivity : ComponentActivity() {
                                         isSyncing = false
                                     }
                                 }
-                                2 -> SentinelScreen(authenticatedUserEmail)
+                                2 -> SentinelScreen(
+                                    userEmail = authenticatedUserEmail,
+                                    onSignOut = {
+                                        scope.launch {
+                                            context.stopService(
+                                                Intent(
+                                                    context,
+                                                    SentinelService::class.java
+                                                )
+                                            )
+
+                                            runCatching {
+                                                withContext(Dispatchers.IO) {
+                                                    supabase.auth.signOut()
+                                                }
+                                            }.onFailure { error ->
+                                                Log.w(
+                                                    "EdgeSwarm",
+                                                    "Supabase sign-out warning: ${error.message}"
+                                                )
+                                            }
+
+                                            sharedPrefs.edit()
+                                                .remove("auth_email")
+                                                .remove("balance")
+                                                .remove("usd")
+                                                .apply()
+
+                                            authenticatedUserEmail = ""
+                                            isLoggedIn = false
+                                        }
+                                    }
+                                )
                             }
                         }
                     }
@@ -199,17 +245,23 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private suspend fun syncWalletKey(email: String, sharedPrefs: android.content.SharedPreferences) {
+    private suspend fun syncWalletKey(email: String): Boolean {
         val nodePrefs = getSharedPreferences("EdgeSwarmNode", MODE_PRIVATE)
-        val keyName = "private_key_$email"
-        val existingLocalKey = nodePrefs.getString(keyName, null)
 
-        if (existingLocalKey != null) {
-            Log.d("EdgeSwarm", "Wallet already synced locally for $email")
-            return
+        if (WalletVault.hasPrivateKey(this, email)) {
+            Log.d("EdgeSwarm", "Wallet already protected by Android Keystore for $email")
+            return true
         }
 
-        try {
+        return try {
+            val legacyLocalKey = nodePrefs.getString("private_key_$email", null)
+
+            if (!legacyLocalKey.isNullOrBlank()) {
+                WalletVault.storePrivateKey(this, email, legacyLocalKey)
+                Log.d("EdgeSwarm", "Legacy wallet migrated into Android Keystore for $email")
+                return true
+            }
+
             Log.d("EdgeSwarm", "Searching cloud for existing wallet...")
 
             val result = supabase.postgrest["worker_wallets"]
@@ -217,21 +269,24 @@ class MainActivity : ComponentActivity() {
                 .decodeSingleOrNull<WorkerWallet>()
 
             if (result != null) {
-                nodePrefs.edit().putString(keyName, result.private_key).apply()
-                Log.d("EdgeSwarm", "Wallet downloaded from cloud for $email")
+                WalletVault.storePrivateKey(this, email, result.private_key)
+                Log.d("EdgeSwarm", "Wallet restored into Android Keystore for $email")
             } else {
                 val ecKeyPair = Keys.createEcKeyPair()
                 val newPrivateKey = ecKeyPair.privateKey.toString(16)
 
-                nodePrefs.edit().putString(keyName, newPrivateKey).apply()
+                WalletVault.storePrivateKey(this, email, newPrivateKey)
 
                 val newWallet = WorkerWallet(email, newPrivateKey)
                 supabase.postgrest["worker_wallets"].insert(newWallet)
 
-                Log.d("EdgeSwarm", "New wallet generated and backed up to cloud for $email")
+                Log.d("EdgeSwarm", "New wallet generated, protected, and backed up for $email")
             }
+
+            true
         } catch (e: Exception) {
             Log.e("EdgeSwarm", "Cloud wallet sync failed: ${e.message}", e)
+            false
         }
     }
 
@@ -254,8 +309,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun getWalletAddressForEmail(email: String): String {
-        val nodePrefs = getSharedPreferences("EdgeSwarmNode", MODE_PRIVATE)
-        val privateKeyHex = nodePrefs.getString("private_key_$email", null)
+        val privateKeyHex = runCatching { WalletVault.loadPrivateKey(this, email) }.getOrNull()
 
         if (privateKeyHex.isNullOrBlank()) {
             return email
@@ -281,10 +335,15 @@ class MainActivity : ComponentActivity() {
             try {
                 Log.d("EdgeSwarm", "Refreshing proof ledger balance from: $url")
 
-                val request = Request.Builder()
+                val requestBuilder = Request.Builder()
                     .url(url)
                     .header("Cache-Control", "no-cache")
-                    .build()
+
+                supabase.auth.currentSessionOrNull()?.accessToken
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { requestBuilder.header("Authorization", "Bearer $it") }
+
+                val request = requestBuilder.build()
 
                 client.newCall(request).execute().use { response ->
                     val body = response.body?.string() ?: "{}"
@@ -319,13 +378,15 @@ class MainActivity : ComponentActivity() {
         }
 
     private fun checkRequiredPermissions() {
-        val permissions = mutableListOf(Manifest.permission.CAMERA)
+        val permissions = mutableListOf<String>()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             permissions.add(Manifest.permission.POST_NOTIFICATIONS)
         }
 
-        requestPermissionLauncher.launch(permissions.toTypedArray())
+        if (permissions.isNotEmpty()) {
+            requestPermissionLauncher.launch(permissions.toTypedArray())
+        }
     }
 }
 
@@ -712,7 +773,11 @@ private suspend fun fetchLedgeEvents(providerEmail: String): List<LedgeItem> =
 
         for (url in candidateUrls) {
             try {
-                val request = Request.Builder().url(url).build()
+                val requestBuilder = Request.Builder().url(url)
+                supabase.auth.currentSessionOrNull()?.accessToken
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { requestBuilder.header("Authorization", "Bearer $it") }
+                val request = requestBuilder.build()
 
                 client.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) return@use
@@ -875,12 +940,11 @@ fun TokenDashboard(
 
 
 // ANDROID_UPDATE_CHECK_V1
-private const val ANDROID_RELEASE_ENDPOINT = "https://api.edgeswarm.io/android/latest-version"
+private val ANDROID_RELEASE_ENDPOINT = "$API_BASE_URL/android/latest-version"
 
 private data class AndroidReleaseInfo(
     val version: String,
     val minimumVersion: String,
-    val required: Boolean,
     val downloadUrl: String,
     val sha256: String,
     val packageName: String
@@ -911,8 +975,10 @@ private suspend fun fetchAndroidReleaseInfo(): AndroidReleaseInfo =
 
             AndroidReleaseInfo(
                 version = json.optString("version", ""),
-                minimumVersion = json.optString("minimumVersion", json.optString("minVersion", "")),
-                required = json.optBoolean("required", false),
+                minimumVersion = json.optString(
+                    "minimumVersion",
+                    json.optString("minVersion", "")
+                ),
                 downloadUrl = json.optString("downloadUrl", ""),
                 sha256 = json.optString("sha256", ""),
                 packageName = json.optString("packageName", "com.edgeswarm.node")
@@ -952,18 +1018,58 @@ private fun compareAppVersions(current: String?, target: String?): Int {
 
 
 @Composable
-fun SentinelScreen(userEmail: String) {
+fun SentinelScreen(
+    userEmail: String,
+    onSignOut: () -> Unit
+) {
     val context = LocalContext.current
-    var isRunning by remember { mutableStateOf(SentinelService.isServiceRunning) }
+    val isRunning by SentinelService.runningState.collectAsState()
 
-    var allowCompute by remember { mutableStateOf(true) }
-    var allowScraping by remember { mutableStateOf(true) }
-    var allowBatteryTasks by remember { mutableStateOf(true) }
+    val nodeSettings = remember(context) {
+        context.getSharedPreferences(
+            "EdgeSwarmNodeSettings",
+            android.content.Context.MODE_PRIVATE
+        )
+    }
 
-    val currentAppVersion = com.edgeswarm.node.BuildConfig.VERSION_NAME
+    var allowCompute by rememberSaveable {
+        mutableStateOf(
+            nodeSettings.getBoolean("allow_compute", true)
+        )
+    }
+
+    var allowScraping by rememberSaveable {
+        mutableStateOf(
+            nodeSettings.getBoolean("allow_scraping", true)
+        )
+    }
+
+    var allowBatteryTasks by rememberSaveable {
+        mutableStateOf(
+            nodeSettings.getBoolean(
+                "allow_battery_tasks",
+                true
+            )
+        )
+    }
+
+    val currentAppVersion = BuildConfig.VERSION_NAME
     var androidReleaseInfo by remember { mutableStateOf<AndroidReleaseInfo?>(null) }
     var androidReleaseLoading by remember { mutableStateOf(true) }
-    var androidReleaseError by remember { mutableStateOf<String?>(null) }
+    var androidReleaseError by remember {
+        mutableStateOf<String?>(null)
+    }
+
+    val updateRequired =
+        androidReleaseInfo != null &&
+        androidReleaseInfo
+            ?.minimumVersion
+            .orEmpty()
+            .isNotBlank() &&
+        compareAppVersions(
+            currentAppVersion,
+            androidReleaseInfo?.minimumVersion
+        ) < 0
 
     LaunchedEffect(Unit) {
         androidReleaseLoading = true
@@ -978,11 +1084,19 @@ fun SentinelScreen(userEmail: String) {
         }
     }
 
+    val nodeScreenScrollState = rememberScrollState()
+
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(24.dp),
-        verticalArrangement = Arrangement.Center,
+            .verticalScroll(nodeScreenScrollState)
+            .padding(
+                start = 24.dp,
+                end = 24.dp,
+                top = 24.dp,
+                bottom = 48.dp
+            ),
+        verticalArrangement = Arrangement.Top,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text(
@@ -1023,13 +1137,27 @@ fun SentinelScreen(userEmail: String) {
             loading = androidReleaseLoading,
             error = androidReleaseError,
             onDownload = {
-                val url = androidReleaseInfo?.downloadUrl
-                if (!url.isNullOrBlank()) {
-                    context.startActivity(
-                        android.content.Intent(
-                            android.content.Intent.ACTION_VIEW,
-                            android.net.Uri.parse(url)
-                        )
+                val release = androidReleaseInfo
+                val url = release?.downloadUrl
+                val uri = url?.let(android.net.Uri::parse)
+                val packageMatches = release?.packageName.isNullOrBlank() ||
+                    release?.packageName == com.edgeswarm.node.BuildConfig.APPLICATION_ID
+
+                when {
+                    !packageMatches -> Toast.makeText(
+                        context,
+                        "Update metadata does not match this Android package.",
+                        Toast.LENGTH_LONG
+                    ).show()
+
+                    uri?.scheme != "https" -> Toast.makeText(
+                        context,
+                        "The update URL is not a secure HTTPS address.",
+                        Toast.LENGTH_LONG
+                    ).show()
+
+                    else -> context.startActivity(
+                        android.content.Intent(android.content.Intent.ACTION_VIEW, uri)
                     )
                 }
             }
@@ -1057,7 +1185,12 @@ fun SentinelScreen(userEmail: String) {
                     subtitle = "Process deterministic matrix and compute tasks.",
                     checked = allowCompute,
                     enabled = !isRunning,
-                    onCheckedChange = { allowCompute = it }
+                    onCheckedChange = {
+                        allowCompute = it
+                        nodeSettings.edit()
+                            .putBoolean("allow_compute", it)
+                            .apply()
+                    }
                 )
 
                 Spacer(modifier = Modifier.height(12.dp))
@@ -1067,7 +1200,12 @@ fun SentinelScreen(userEmail: String) {
                     subtitle = "Handle structured web and data extraction tasks.",
                     checked = allowScraping,
                     enabled = !isRunning,
-                    onCheckedChange = { allowScraping = it }
+                    onCheckedChange = {
+                        allowScraping = it
+                        nodeSettings.edit()
+                            .putBoolean("allow_scraping", it)
+                            .apply()
+                    }
                 )
 
                 Spacer(modifier = Modifier.height(12.dp))
@@ -1087,29 +1225,95 @@ fun SentinelScreen(userEmail: String) {
                     subtitle = "Allow Level 1 deterministic tasks while the phone is on battery.",
                     checked = allowBatteryTasks,
                     enabled = !isRunning,
-                    onCheckedChange = { allowBatteryTasks = it }
+                    onCheckedChange = {
+                        allowBatteryTasks = it
+                        nodeSettings.edit()
+                            .putBoolean("allow_battery_tasks", it)
+                            .apply()
+                    }
                 )
             }
         }
 
-        Spacer(modifier = Modifier.height(32.dp))
+        Spacer(modifier = Modifier.height(20.dp))
+
+        Text(
+            text =
+                "Android may stop data-sync foreground services after " +
+                    "the system quota is reached. The node shuts down " +
+                    "cleanly and can be reactivated later.",
+            color = Color.Gray,
+            fontSize = 10.sp,
+            textAlign = TextAlign.Center
+        )
+
+        Spacer(modifier = Modifier.height(20.dp))
 
         Button(
             onClick = {
                 val serviceIntent = Intent(context, SentinelService::class.java)
 
                 if (!isRunning) {
-                    serviceIntent.putExtra("USER_EMAIL", userEmail)
-                    serviceIntent.putExtra("ALLOW_COMPUTE", allowCompute)
-                    serviceIntent.putExtra("ALLOW_SCRAPING", allowScraping)
-                    serviceIntent.putExtra("ALLOW_SLM", false)
-                    serviceIntent.putExtra("ALLOW_BATTERY_TASKS", allowBatteryTasks)
+                    val accessToken = supabase.auth.currentSessionOrNull()?.accessToken
+                    val walletReady = WalletVault.hasPrivateKey(context, userEmail)
 
-                    ContextCompat.startForegroundService(context, serviceIntent)
-                    isRunning = true
+                    when {
+                        accessToken.isNullOrBlank() -> Toast.makeText(
+                            context,
+                            "Your session has expired. Sign in again before activating the node.",
+                            Toast.LENGTH_LONG
+                        ).show()
+
+                        !walletReady -> Toast.makeText(
+                            context,
+                            "The node wallet is not ready yet. Reopen the app and let wallet sync finish.",
+                            Toast.LENGTH_LONG
+                        ).show()
+
+                        updateRequired -> Toast.makeText(
+                            context,
+                            "Install the required Android node update before activating.",
+                            Toast.LENGTH_LONG
+                        ).show()
+
+                        else -> {
+                            serviceIntent.putExtra(
+                                "USER_EMAIL",
+                                userEmail
+                            )
+                            serviceIntent.putExtra(
+                                "ACCESS_TOKEN",
+                                accessToken
+                            )
+                            serviceIntent.putExtra(
+                                "ALLOW_COMPUTE",
+                                allowCompute
+                            )
+                            serviceIntent.putExtra(
+                                "ALLOW_SCRAPING",
+                                allowScraping
+                            )
+                            serviceIntent.putExtra(
+                                "ALLOW_BATTERY_TASKS",
+                                allowBatteryTasks
+                            )
+
+                            runCatching {
+                                ContextCompat.startForegroundService(
+                                    context,
+                                    serviceIntent
+                                )
+                            }.onFailure { error ->
+                                Toast.makeText(
+                                    context,
+                                    "Node activation failed: ${error.message}",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            }
+                        }
+                    }
                 } else {
                     context.stopService(serviceIntent)
-                    isRunning = false
                 }
             },
             modifier = Modifier
@@ -1121,8 +1325,29 @@ fun SentinelScreen(userEmail: String) {
             )
         ) {
             Text(
-                text = if (isRunning) "STOP HEADLESS NODE" else "ACTIVATE NODE",
+                text = if (isRunning) {
+                    "DEACTIVATE NODE"
+                } else {
+                    "ACTIVATE NODE"
+                },
                 fontWeight = FontWeight.ExtraBold
+            )
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        TextButton(
+            onClick = onSignOut,
+            enabled = !isRunning
+        ) {
+            Text(
+                text = if (isRunning) {
+                    "DEACTIVATE NODE BEFORE SIGNING OUT"
+                } else {
+                    "SIGN OUT"
+                },
+                color = Color.Gray,
+                fontSize = 11.sp
             )
         }
     }
