@@ -304,7 +304,7 @@ class SentinelService : Service() {
         serviceScope.launch {
             try {
                 Log.d("EdgeSwarm", "ðŸš€ Headless Engine Booting (CPU Mode)...")
-                // Android v1.5.8 is Level 1 only. Do not initialize local neural inference.
+                // Android v1.5.9 is Level 1 only. Do not initialize local neural inference.
 
                 val deviceName = android.os.Build.MANUFACTURER + "_" + android.os.Build.MODEL
                 val hardwareId = deviceName.replace(" ", "") + "_" + Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID).take(6)

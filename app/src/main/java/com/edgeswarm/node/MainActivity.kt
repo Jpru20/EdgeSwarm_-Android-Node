@@ -873,6 +873,84 @@ fun TokenDashboard(
     }
 }
 
+
+// ANDROID_UPDATE_CHECK_V1
+private const val ANDROID_RELEASE_ENDPOINT = "https://api.edgeswarm.io/android/latest-version"
+
+private data class AndroidReleaseInfo(
+    val version: String,
+    val minimumVersion: String,
+    val required: Boolean,
+    val downloadUrl: String,
+    val sha256: String,
+    val packageName: String
+)
+
+private suspend fun fetchAndroidReleaseInfo(): AndroidReleaseInfo =
+    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        val connection = (java.net.URL(ANDROID_RELEASE_ENDPOINT).openConnection() as java.net.HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 8000
+            readTimeout = 8000
+            setRequestProperty("Accept", "application/json")
+        }
+
+        try {
+            val code = connection.responseCode
+            val body = if (code in 200..299) {
+                connection.inputStream.bufferedReader().use { it.readText() }
+            } else {
+                connection.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
+            }
+
+            if (code !in 200..299) {
+                throw IllegalStateException("Android release check failed with HTTP $code")
+            }
+
+            val json = org.json.JSONObject(body)
+
+            AndroidReleaseInfo(
+                version = json.optString("version", ""),
+                minimumVersion = json.optString("minimumVersion", json.optString("minVersion", "")),
+                required = json.optBoolean("required", false),
+                downloadUrl = json.optString("downloadUrl", ""),
+                sha256 = json.optString("sha256", ""),
+                packageName = json.optString("packageName", "com.edgeswarm.node")
+            )
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+private fun cleanVersionForCompare(value: String?): List<Int> {
+    if (value.isNullOrBlank()) return listOf(0)
+    return value
+        .trim()
+        .removePrefix("v")
+        .removePrefix("V")
+        .split(".", "-", "_")
+        .mapNotNull { part ->
+            val digits = part.takeWhile { it.isDigit() }
+            digits.toIntOrNull()
+        }
+        .ifEmpty { listOf(0) }
+}
+
+private fun compareAppVersions(current: String?, target: String?): Int {
+    val a = cleanVersionForCompare(current)
+    val b = cleanVersionForCompare(target)
+    val max = maxOf(a.size, b.size)
+
+    for (i in 0 until max) {
+        val av = a.getOrElse(i) { 0 }
+        val bv = b.getOrElse(i) { 0 }
+        if (av != bv) return av.compareTo(bv)
+    }
+
+    return 0
+}
+
+
 @Composable
 fun SentinelScreen(userEmail: String) {
     val context = LocalContext.current
@@ -881,6 +959,24 @@ fun SentinelScreen(userEmail: String) {
     var allowCompute by remember { mutableStateOf(true) }
     var allowScraping by remember { mutableStateOf(true) }
     var allowBatteryTasks by remember { mutableStateOf(true) }
+
+    val currentAppVersion = com.edgeswarm.node.BuildConfig.VERSION_NAME
+    var androidReleaseInfo by remember { mutableStateOf<AndroidReleaseInfo?>(null) }
+    var androidReleaseLoading by remember { mutableStateOf(true) }
+    var androidReleaseError by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(Unit) {
+        androidReleaseLoading = true
+        androidReleaseError = null
+
+        try {
+            androidReleaseInfo = fetchAndroidReleaseInfo()
+        } catch (error: Exception) {
+            androidReleaseError = error.message ?: "Unable to check latest Android version."
+        } finally {
+            androidReleaseLoading = false
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -897,7 +993,7 @@ fun SentinelScreen(userEmail: String) {
         )
 
         Text(
-            text = "APP VERSION: v1.5.8",
+            text = "APP VERSION: v$currentAppVersion",
             color = Color(0xFF00FFCC),
             fontSize = 11.sp,
             modifier = Modifier.padding(top = 4.dp),
@@ -919,7 +1015,27 @@ fun SentinelScreen(userEmail: String) {
             modifier = Modifier.padding(top = 4.dp)
         )
 
-        Spacer(modifier = Modifier.height(32.dp))
+        Spacer(modifier = Modifier.height(12.dp))
+
+        AndroidUpdateStatusCard(
+            currentVersion = currentAppVersion,
+            releaseInfo = androidReleaseInfo,
+            loading = androidReleaseLoading,
+            error = androidReleaseError,
+            onDownload = {
+                val url = androidReleaseInfo?.downloadUrl
+                if (!url.isNullOrBlank()) {
+                    context.startActivity(
+                        android.content.Intent(
+                            android.content.Intent.ACTION_VIEW,
+                            android.net.Uri.parse(url)
+                        )
+                    )
+                }
+            }
+        )
+
+        Spacer(modifier = Modifier.height(24.dp))
 
         Card(
             modifier = Modifier.fillMaxWidth(),
@@ -1149,4 +1265,123 @@ private fun extractJsonArray(body: String): JSONArray {
 
 
 
+
+
+
+@Composable
+private fun AndroidUpdateStatusCard(
+    currentVersion: String,
+    releaseInfo: AndroidReleaseInfo?,
+    loading: Boolean,
+    error: String?,
+    onDownload: () -> Unit
+) {
+    val latestVersion = releaseInfo?.version.orEmpty()
+    val minimumVersion = releaseInfo?.minimumVersion.orEmpty()
+
+    val updateRequired = releaseInfo != null &&
+        minimumVersion.isNotBlank() &&
+        compareAppVersions(currentVersion, minimumVersion) < 0
+
+    val updateAvailable = releaseInfo != null &&
+        latestVersion.isNotBlank() &&
+        compareAppVersions(currentVersion, latestVersion) < 0
+
+    val statusText = when {
+        loading -> "Checking latest version..."
+        error != null -> "Update check unavailable"
+        updateRequired -> "Update required"
+        updateAvailable -> "Update available"
+        else -> "Up to date"
+    }
+
+    val statusColor = when {
+        updateRequired -> Color(0xFFFF6B6B)
+        updateAvailable -> Color(0xFFFFB020)
+        error != null -> Color(0xFFFFB020)
+        loading -> Color.Gray
+        else -> Color(0xFF00FFCC)
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF11161A)),
+        shape = RoundedCornerShape(10.dp)
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Text(
+                "ANDROID RELEASE CHECK",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color.Gray
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(
+                text = "Current version: v$currentVersion",
+                color = Color.White,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium
+            )
+
+            Text(
+                text = "Latest version: ${if (latestVersion.isBlank()) "Unknown" else "v$latestVersion"}",
+                color = Color.Gray,
+                fontSize = 12.sp,
+                modifier = Modifier.padding(top = 3.dp)
+            )
+
+            Text(
+                text = "Minimum required: ${if (minimumVersion.isBlank()) "Unknown" else "v$minimumVersion"}",
+                color = Color.Gray,
+                fontSize = 12.sp,
+                modifier = Modifier.padding(top = 3.dp)
+            )
+
+            Text(
+                text = "Status: $statusText",
+                color = statusColor,
+                fontSize = 12.sp,
+                modifier = Modifier.padding(top = 6.dp),
+                fontWeight = FontWeight.Bold
+            )
+
+            if (!error.isNullOrBlank()) {
+                Text(
+                    text = error,
+                    color = Color(0xFFFFB020),
+                    fontSize = 11.sp,
+                    modifier = Modifier.padding(top = 6.dp)
+                )
+            }
+
+            if (updateRequired || updateAvailable) {
+                Spacer(modifier = Modifier.height(10.dp))
+
+                Button(
+                    onClick = onDownload,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(8.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF03DAC5))
+                ) {
+                    Text(
+                        if (updateRequired) "DOWNLOAD REQUIRED UPDATE" else "DOWNLOAD LATEST APK",
+                        color = Color.Black,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                if (!releaseInfo?.sha256.isNullOrBlank()) {
+                    Text(
+                        text = "SHA256: ${releaseInfo?.sha256}",
+                        color = Color.Gray,
+                        fontSize = 9.sp,
+                        modifier = Modifier.padding(top = 6.dp)
+                    )
+                }
+            }
+        }
+    }
+}
 
