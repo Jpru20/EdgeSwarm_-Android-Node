@@ -1059,7 +1059,174 @@ fun SentinelScreen(
         )
     }
 
-val currentAppVersion = BuildConfig.VERSION_NAME
+    val level2Installer = remember(context) {
+        AndroidLevel2ModelInstaller(context)
+    }
+
+    val level2UiScope = rememberCoroutineScope()
+
+    var showLevel2DownloadDialog by rememberSaveable {
+        mutableStateOf(false)
+    }
+
+    var level2InstallInProgress by remember {
+        mutableStateOf(false)
+    }
+
+    var level2StatusText by rememberSaveable {
+        mutableStateOf(
+            if (allowNeuralTasks) {
+                "Verified model installed. Runtime self-test is still required."
+            } else {
+                "Optional 2.6 GB Gemma model for supported Android devices."
+            }
+        )
+    }
+
+    if (showLevel2DownloadDialog) {
+        AlertDialog(
+            onDismissRequest = {
+                if (!level2InstallInProgress) {
+                    showLevel2DownloadDialog = false
+                }
+            },
+            title = {
+                Text("Enable Level 2?")
+            },
+            text = {
+                Text(
+                    "EdgeSwarm will verify this phone's hardware, then " +
+                        "download approximately 2.6 GB over HTTPS. " +
+                        "The model remains in private app storage."
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showLevel2DownloadDialog = false
+                        level2InstallInProgress = true
+                        level2StatusText =
+                            "Checking Level 2 hardware eligibility..."
+
+                        level2UiScope.launch {
+                            try {
+                                val recommendation =
+                                    level2Installer.requestRecommendation(
+                                        confirmDownload = true
+                                    )
+
+                                check(recommendation.qualified) {
+                                    recommendation.downloadBlockedReason
+                                        ?: "This phone does not meet Level 2 requirements."
+                                }
+
+                                val descriptor =
+                                    recommendation.model
+                                        ?: error(
+                                            "The backend did not return a Level 2 model."
+                                        )
+
+                                check(
+                                    recommendation.shouldDownload &&
+                                        descriptor.downloadReady
+                                ) {
+                                    recommendation.downloadBlockedReason
+                                        ?: "The Level 2 download is not available."
+                                }
+
+                                var lastProgressPercent = -1
+
+                                level2Installer.downloadAndInstall(
+                                    descriptor
+                                ) { progress ->
+                                    val message = when (progress.stage) {
+                                        AndroidLevel2InstallStage.CHECKING ->
+                                            "Checking the existing model..."
+
+                                        AndroidLevel2InstallStage.DOWNLOADING ->
+                                            "Downloading Gemma: ${progress.percent}%"
+
+                                        AndroidLevel2InstallStage.VERIFYING ->
+                                            "Verifying model integrity..."
+
+                                        AndroidLevel2InstallStage.INSTALLED ->
+                                            "Model downloaded and verified."
+                                    }
+
+                                    if (
+                                        progress.percent !=
+                                            lastProgressPercent ||
+                                        progress.stage !=
+                                            AndroidLevel2InstallStage.DOWNLOADING
+                                    ) {
+                                        lastProgressPercent =
+                                            progress.percent
+
+                                        level2UiScope.launch {
+                                            level2StatusText = message
+                                        }
+                                    }
+                                }
+
+                                allowNeuralTasks = true
+
+                                nodeSettings.edit()
+                                    .putBoolean(
+                                        "allow_neural",
+                                        true
+                                    )
+                                    .apply()
+
+                                level2StatusText =
+                                    "Model installed and verified. " +
+                                        "Runtime self-test is next."
+
+                                Toast.makeText(
+                                    context,
+                                    "Level 2 model installed successfully.",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            } catch (error: Throwable) {
+                                allowNeuralTasks = false
+
+                                nodeSettings.edit()
+                                    .putBoolean(
+                                        "allow_neural",
+                                        false
+                                    )
+                                    .apply()
+
+                                level2StatusText =
+                                    error.message
+                                        ?: "Level 2 setup failed."
+
+                                Toast.makeText(
+                                    context,
+                                    level2StatusText,
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            } finally {
+                                level2InstallInProgress = false
+                            }
+                        }
+                    }
+                ) {
+                    Text("Check and Download")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        showLevel2DownloadDialog = false
+                    }
+                ) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    val currentAppVersion = BuildConfig.VERSION_NAME
     var androidReleaseInfo by remember { mutableStateOf<AndroidReleaseInfo?>(null) }
     var androidReleaseLoading by remember { mutableStateOf(true) }
     var androidReleaseError by remember {
@@ -1228,14 +1395,28 @@ val currentAppVersion = BuildConfig.VERSION_NAME
 
                 RoutingSwitchRow(
                     title = "Level 2 Neural Inference",
-                    subtitle = "Use a verified local Gemma model when one is installed.",
+                    subtitle = level2StatusText,
                     checked = allowNeuralTasks,
-                    enabled = !isRunning,
-                    onCheckedChange = {
-                        allowNeuralTasks = it
-                        nodeSettings.edit()
-                            .putBoolean("allow_neural", it)
-                            .apply()
+                    enabled =
+                        !isRunning &&
+                            !level2InstallInProgress,
+                    onCheckedChange = { enabled ->
+                        if (enabled) {
+                            showLevel2DownloadDialog = true
+                        } else {
+                            allowNeuralTasks = false
+
+                            nodeSettings.edit()
+                                .putBoolean(
+                                    "allow_neural",
+                                    false
+                                )
+                                .apply()
+
+                            level2StatusText =
+                                "Level 2 disabled. The installed model " +
+                                    "remains available for later use."
+                        }
                     }
                 )
 
