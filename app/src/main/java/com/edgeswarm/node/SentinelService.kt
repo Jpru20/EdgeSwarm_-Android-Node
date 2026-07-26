@@ -473,11 +473,43 @@ private var lastHeartbeatAtMs = 0L
 
             val batteryInfo = getBatteryInfoForHeartbeat()
             val batteryTempC = getBatteryTempCForHeartbeat()
+            val level2Ready = isLevel2Ready()
             val capabilitiesList = getAndroidCapabilities()
             val capabilities = JSONArray().apply {
                 capabilitiesList.forEach { put(it) }
             }
-            val eligibleModelCapabilities = JSONArray()
+            val eligibleModelCapabilities = JSONArray().apply {
+                if (level2Ready) {
+                    put(
+                        level2ActiveCapability
+                            ?: "Neural-Inference-3B"
+                    )
+                }
+            }
+
+            val level2ModelStatus = when {
+                level2Ready -> "ready"
+                !allowNeuralTasks -> "not_required"
+                level2LastError != null -> "error"
+                else -> "self_test_pending"
+            }
+
+            val level2ModelCapability =
+                if (level2Ready) {
+                    level2ActiveCapability
+                        ?: "Neural-Inference-3B"
+                } else {
+                    null
+                }
+
+            val level2ModelId =
+                if (level2Ready) {
+                    level2ActiveModelId
+                        ?: "gemma4:e2b"
+                } else {
+                    "none"
+                }
+
             val currentTasks = JSONArray().apply {
                 currentTaskIds.forEach { put(it) }
             }
@@ -505,18 +537,53 @@ private var lastHeartbeatAtMs = 0L
                 .put("authenticationMode", "supabase_bearer")
                 .put("capabilities", capabilities)
                 .put("eligibleModelCapabilities", eligibleModelCapabilities)
-                .put("recommendedModelCapability", JSONObject.NULL)
-                .put("modelStatus", "not_required")
-                .put("modelCapability", JSONObject.NULL)
-                .put("modelId", "none")
-                .put("edgeLevel", 1)
-                .put("edgeLevelLabel", "Level 1")
-                .put("edge_level", 1)
-                .put("edge_level_label", "Level 1")
-                .put("runtime", "android-kotlin-deterministic-v2")
-                .put("runtimeAcceleration", "cpu")
+                .put(
+                    "recommendedModelCapability",
+                    level2ModelCapability ?: JSONObject.NULL
+                )
+                .put("modelStatus", level2ModelStatus)
+                .put(
+                    "modelCapability",
+                    level2ModelCapability ?: JSONObject.NULL
+                )
+                .put("modelId", level2ModelId)
+                .put(
+                    "edgeLevel",
+                    if (level2Ready) 2 else 1
+                )
+                .put(
+                    "edgeLevelLabel",
+                    if (level2Ready) "Level 2" else "Level 1"
+                )
+                .put(
+                    "edge_level",
+                    if (level2Ready) 2 else 1
+                )
+                .put(
+                    "edge_level_label",
+                    if (level2Ready) "Level 2" else "Level 1"
+                )
+                .put(
+                    "runtime",
+                    if (level2Ready) {
+                        "litert-lm"
+                    } else {
+                        "android-kotlin-deterministic-v2"
+                    }
+                )
+                .put(
+                    "runtimeAcceleration",
+                    if (level2Ready) {
+                        level2ActiveBackend ?: "unknown"
+                    } else {
+                        "cpu"
+                    }
+                )
                 .put("canReceivePaidJobs", capabilitiesList.isNotEmpty())
-                .put("canReceiveNeuralJobs", false)
+                .put(
+                    "canReceiveNeuralJobs",
+                    level2Ready
+                )
                 .put("status", "online")
                 .put("startedAt", java.time.Instant.ofEpochMilli(nodeStartedAtMs).toString())
                 .put("uptimeSec", ((SystemClock.elapsedRealtime() - nodeStartedElapsedMs) / 1000L).toInt())
@@ -820,9 +887,69 @@ private var lastHeartbeatAtMs = 0L
                                         "Exact extraction plan is not supported."
                                     )
                             } else if (isNeuralTask) {
-                                throw IllegalArgumentException(
-                                    "Neural tasks are not supported by " +
-                                        "Android Level 1 nodes."
+                                val requestedCapabilities =
+                                    routeValues.filter {
+                                        it.startsWith(
+                                            "Neural-Inference",
+                                            ignoreCase = true
+                                        )
+                                    }
+
+                                check(
+                                    requestedCapabilities.all {
+                                        it.equals(
+                                            "Neural-Inference-3B",
+                                            ignoreCase = true
+                                        )
+                                    }
+                                ) {
+                                    "Unsupported Android neural capability: " +
+                                        requestedCapabilities.joinToString(",")
+                                }
+
+                                val readyRuntime =
+                                    level2Runtime?.takeIf {
+                                        allowNeuralTasks &&
+                                            level2SelfTestPassed &&
+                                            it.isReady
+                                    } ?: throw IllegalStateException(
+                                        "Android Level 2 runtime is not ready."
+                                    )
+
+                                val inferenceStartedAt =
+                                    SystemClock.elapsedRealtime()
+
+                                logTiming(
+                                    "inference_start",
+                                    taskId
+                                )
+
+                                val neuralResult =
+                                    readyRuntime.generate(prompt)
+
+                                val inferenceLatencyMs =
+                                    SystemClock.elapsedRealtime() -
+                                        inferenceStartedAt
+
+                                logTiming(
+                                    "inference_end",
+                                    taskId,
+                                    inferenceLatencyMs
+                                )
+
+                                aiOutput = neuralResult.text
+
+                                Log.i(
+                                    "EdgeSwarm",
+                                    "Android Level 2 inference complete: " +
+                                        "taskId=$taskId, " +
+                                        "model=${level2ActiveModelId}, " +
+                                        "backend=${level2ActiveBackend}, " +
+                                        "latencyMs=$inferenceLatencyMs, " +
+                                        "ttftMs=${neuralResult.timeToFirstTokenMs}, " +
+                                        "decodeTps=${neuralResult.decodeTokensPerSecond}, " +
+                                        "inputTokens=${neuralResult.inputTokens}, " +
+                                        "outputTokens=${neuralResult.outputTokens}"
                                 )
                             } else {
                                 throw IllegalArgumentException(
@@ -2145,11 +2272,32 @@ private var lastHeartbeatAtMs = 0L
         }
     }
 
+    private fun isLevel2Ready(): Boolean {
+        return allowNeuralTasks &&
+            level2SelfTestPassed &&
+            level2Runtime?.isReady == true &&
+            !level2ActiveModelId.isNullOrBlank() &&
+            level2ActiveCapability.equals(
+                "Neural-Inference-3B",
+                ignoreCase = true
+            )
+    }
+
     private fun getAndroidCapabilities(): List<String> {
         return buildList {
             add("Exact-Extraction")
-            if (allowScrapingTasks) add("Data-Scraper")
-            if (allowComputeTasks) add("Distributed-Compute")
+
+            if (allowScrapingTasks) {
+                add("Data-Scraper")
+            }
+
+            if (allowComputeTasks) {
+                add("Distributed-Compute")
+            }
+
+            if (isLevel2Ready()) {
+                add("Neural-Inference-3B")
+            }
         }
     }
 

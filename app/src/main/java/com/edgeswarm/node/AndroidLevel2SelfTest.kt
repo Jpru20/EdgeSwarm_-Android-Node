@@ -30,7 +30,7 @@ class AndroidLevel2SelfTestCoordinator(
         withContext(Dispatchers.IO) {
             val recommendation =
                 installer.requestRecommendation(
-                    confirmDownload = false
+                    confirmDownload = true
                 )
 
             check(recommendation.qualified) {
