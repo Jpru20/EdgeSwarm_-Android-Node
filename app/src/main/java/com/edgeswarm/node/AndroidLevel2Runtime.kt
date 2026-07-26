@@ -172,23 +172,29 @@ class AndroidLevel2Runtime(
                         "LiteRT-LM returned an empty text response."
                     }
 
-                    val benchmark = conversation.getBenchmarkInfo()
+                    val benchmark =
+                        runCatching {
+                            conversation.getBenchmarkInfo()
+                        }.getOrNull()
 
                     AndroidLevel2InferenceResult(
                         text = generatedText,
                         inputTokens =
-                            benchmark.lastPrefillTokenCount,
+                            benchmark?.lastPrefillTokenCount ?: 0,
                         outputTokens =
-                            benchmark.lastDecodeTokenCount,
+                            benchmark?.lastDecodeTokenCount ?: 0,
                         totalConversationTokens =
                             conversation.getTokenCount(),
                         timeToFirstTokenMs =
-                            (
-                                benchmark.timeToFirstTokenInSecond *
-                                    1000.0
-                                ).roundToLong(),
+                            benchmark
+                                ?.timeToFirstTokenInSecond
+                                ?.times(1000.0)
+                                ?.roundToLong()
+                                ?: 0L,
                         decodeTokensPerSecond =
-                            benchmark.lastDecodeTokensPerSecond
+                            benchmark
+                                ?.lastDecodeTokensPerSecond
+                                ?: 0.0
                     )
                 }
         }

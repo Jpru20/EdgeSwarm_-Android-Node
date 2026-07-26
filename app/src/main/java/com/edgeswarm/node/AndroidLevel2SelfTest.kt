@@ -1,4 +1,4 @@
-package com.edgeswarm.node
+﻿package com.edgeswarm.node
 
 import android.content.Context
 import kotlinx.coroutines.CancellationException
@@ -62,7 +62,7 @@ class AndroidLevel2SelfTestCoordinator(
                     runtime.initialize(
                         modelFile = modelFile,
                         backend = backend,
-                        maxNumTokens = 512
+                        maxNumTokens = 2048
                     )
 
                     val inference = runtime.generate(
