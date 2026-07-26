@@ -110,6 +110,21 @@ class SentinelService : Service() {
     private var allowNeuralTasks = false
     private var level2Runtime: AndroidLevel2Runtime? = null
 
+    @Volatile
+    private var level2SelfTestPassed = false
+
+    @Volatile
+    private var level2ActiveModelId: String? = null
+
+    @Volatile
+    private var level2ActiveCapability: String? = null
+
+    @Volatile
+    private var level2ActiveBackend: String? = null
+
+    @Volatile
+    private var level2LastError: String? = null
+
 private var lastHeartbeatAtMs = 0L
     private val heartbeatIntervalMs = 5_000L
     private var nodeWalletAddress: String? = null
@@ -235,6 +250,7 @@ private var lastHeartbeatAtMs = 0L
         }
 
         isServiceRunning = true
+        startLevel2SelfTestIfEnabled()
         startHeadlessEngine(userEmail)
 
         return START_NOT_STICKY
@@ -252,6 +268,11 @@ private var lastHeartbeatAtMs = 0L
         runCatching { level2Runtime?.close() }
         level2Runtime = null
         allowNeuralTasks = false
+        level2SelfTestPassed = false
+        level2ActiveModelId = null
+        level2ActiveCapability = null
+        level2ActiveBackend = null
+        level2LastError = null
         releaseExecutionWakeLock()
     }
 
@@ -2000,6 +2021,77 @@ private var lastHeartbeatAtMs = 0L
             false
         }
     }
+
+    private fun startLevel2SelfTestIfEnabled() {
+        if (!allowNeuralTasks) {
+            return
+        }
+
+        val runtime = level2Runtime ?: return
+
+        level2SelfTestPassed = false
+        level2ActiveModelId = null
+        level2ActiveCapability = null
+        level2ActiveBackend = null
+        level2LastError = null
+
+        serviceScope.launch(Dispatchers.IO) {
+            try {
+                Log.i(
+                    "EdgeSwarm",
+                    "Starting Android Level 2 runtime self-test."
+                )
+
+                val result =
+                    AndroidLevel2SelfTestCoordinator(
+                        this@SentinelService
+                    ).initializeAndRun(runtime)
+
+                if (!isServiceRunning) {
+                    runCatching { runtime.close() }
+                    return@launch
+                }
+
+                level2SelfTestPassed = true
+                level2ActiveModelId = result.modelId
+                level2ActiveCapability = result.capability
+                level2ActiveBackend =
+                    result.backend.telemetryName
+                level2LastError = null
+
+                Log.i(
+                    "EdgeSwarm",
+                    "Android Level 2 self-test passed: " +
+                        "model=${result.modelId}, " +
+                        "capability=${result.capability}, " +
+                        "backend=${result.backend.telemetryName}, " +
+                        "ttftMs=${result.timeToFirstTokenMs}, " +
+                        "decodeTps=${result.decodeTokensPerSecond}, " +
+                        "inputTokens=${result.inputTokens}, " +
+                        "outputTokens=${result.outputTokens}"
+                )
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                level2SelfTestPassed = false
+                level2ActiveModelId = null
+                level2ActiveCapability = null
+                level2ActiveBackend = null
+                level2LastError =
+                    error.message ?: error.javaClass.simpleName
+
+                runCatching { runtime.close() }
+
+                Log.e(
+                    "EdgeSwarm",
+                    "Android Level 2 self-test failed. " +
+                        "Node remains Level 1.",
+                    error
+                )
+            }
+        }
+    }
+
 
     private fun fetchTaskFromMempool(hwId: String, providerEmail: String): JSONObject? {
         val pollStartedAt = SystemClock.elapsedRealtime()
