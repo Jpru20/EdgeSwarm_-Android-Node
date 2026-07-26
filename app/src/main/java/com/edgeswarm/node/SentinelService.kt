@@ -107,7 +107,10 @@ class SentinelService : Service() {
     private var allowComputeTasks = true
     private var allowScrapingTasks = true
     private var allowBatteryTasks = true
-    private var lastHeartbeatAtMs = 0L
+    private var allowNeuralTasks = false
+    private var level2Runtime: AndroidLevel2Runtime? = null
+
+private var lastHeartbeatAtMs = 0L
     private val heartbeatIntervalMs = 5_000L
     private var nodeWalletAddress: String? = null
     private var heartbeatIdentityLogged = false
@@ -218,6 +221,18 @@ class SentinelService : Service() {
         allowComputeTasks = intent?.getBooleanExtra("ALLOW_COMPUTE", true) ?: true
         allowScrapingTasks = intent?.getBooleanExtra("ALLOW_SCRAPING", true) ?: true
         allowBatteryTasks = intent?.getBooleanExtra("ALLOW_BATTERY_TASKS", true) ?: true
+        allowNeuralTasks =
+            intent?.getBooleanExtra("ALLOW_NEURAL", false) ?: false
+
+        if (allowNeuralTasks && level2Runtime == null) {
+            level2Runtime = AndroidLevel2Runtime(
+                cacheDir = filesDir.resolve("level2_litert_lm_cache")
+            )
+            Log.i(
+                "EdgeSwarm",
+                "Level 2 enabled; waiting for a verified model installation."
+            )
+        }
 
         isServiceRunning = true
         startHeadlessEngine(userEmail)
@@ -234,6 +249,9 @@ class SentinelService : Service() {
         isServiceRunning = false
         serviceScope.cancel()
         initialAccessToken = null
+        runCatching { level2Runtime?.close() }
+        level2Runtime = null
+        allowNeuralTasks = false
         releaseExecutionWakeLock()
     }
 

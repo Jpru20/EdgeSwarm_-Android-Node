@@ -1,4 +1,4 @@
-package com.edgeswarm.node
+﻿package com.edgeswarm.node
 
 import android.Manifest
 import android.content.Intent
@@ -1053,7 +1053,13 @@ fun SentinelScreen(
         )
     }
 
-    val currentAppVersion = BuildConfig.VERSION_NAME
+    var allowNeuralTasks by rememberSaveable {
+        mutableStateOf(
+            nodeSettings.getBoolean("allow_neural", false)
+        )
+    }
+
+val currentAppVersion = BuildConfig.VERSION_NAME
     var androidReleaseInfo by remember { mutableStateOf<AndroidReleaseInfo?>(null) }
     var androidReleaseLoading by remember { mutableStateOf(true) }
     var androidReleaseError by remember {
@@ -1221,6 +1227,22 @@ fun SentinelScreen(
                 Spacer(modifier = Modifier.height(12.dp))
 
                 RoutingSwitchRow(
+                    title = "Level 2 Neural Inference",
+                    subtitle = "Use a verified local Gemma model when one is installed.",
+                    checked = allowNeuralTasks,
+                    enabled = !isRunning,
+                    onCheckedChange = {
+                        allowNeuralTasks = it
+                        nodeSettings.edit()
+                            .putBoolean("allow_neural", it)
+                            .apply()
+                    }
+                )
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+
+                RoutingSwitchRow(
                     title = "Accept Tasks While Not Charging",
                     subtitle = "Allow Level 1 deterministic tasks while the phone is on battery.",
                     checked = allowBatteryTasks,
@@ -1296,6 +1318,10 @@ fun SentinelScreen(
                             serviceIntent.putExtra(
                                 "ALLOW_BATTERY_TASKS",
                                 allowBatteryTasks
+                            )
+                            serviceIntent.putExtra(
+                                "ALLOW_NEURAL",
+                                allowNeuralTasks
                             )
 
                             runCatching {
