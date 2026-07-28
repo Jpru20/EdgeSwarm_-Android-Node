@@ -1346,6 +1346,49 @@ class SentinelService : Service() {
 
                         val inputTokens = countLevel1InputTokens(prompt)
                         val outputTokens = estimateTokenCountFromText(aiOutput)
+
+                        // ANDROID_RESULT_MODEL_CONTRACT_V1
+                        // Report the exact implementation that produced
+                        // the result, not only the model advertised by
+                        // the most recent heartbeat.
+                        val reportedModelIdUsed =
+                            when {
+                                isNeuralTask ->
+                                    level2ActiveModelId
+                                        ?.takeIf { it.isNotBlank() }
+                                        ?: selectedModel
+                                            .takeIf { it.isNotBlank() }
+
+                                isExactExtractionTask ->
+                                    "edgeswarm-deterministic-extraction-v1"
+
+                                isComputeTask ->
+                                    "edgeswarm-deterministic-compute-v1"
+
+                                isScrapeTask ->
+                                    "edgeswarm-deterministic-scraper-v1"
+
+                                else ->
+                                    selectedModel
+                                        .takeIf { it.isNotBlank() }
+                            }
+
+                        val reportedRuntime =
+                            if (isNeuralTask) {
+                                "litert-lm"
+                            } else {
+                                "android-kotlin-deterministic-v2"
+                            }
+
+                        val reportedRuntimeAcceleration =
+                            if (isNeuralTask) {
+                                level2ActiveBackend
+                                    ?.takeIf { it.isNotBlank() }
+                                    ?: "unknown"
+                            } else {
+                                "cpu"
+                            }
+
                         uploadViaStream(
                             taskId = taskId,
                             workerEmail = userEmail,
@@ -1354,7 +1397,11 @@ class SentinelService : Service() {
                             aiOutput = aiOutput,
                             inputTokens = inputTokens,
                             outputTokens = outputTokens,
-                            finalStatus = if (isError) "error" else "success"
+                            finalStatus = if (isError) "error" else "success",
+                            modelIdUsed = reportedModelIdUsed,
+                            runtime = reportedRuntime,
+                            runtimeAcceleration =
+                                reportedRuntimeAcceleration
                         )
 
                         maybeSendNodeHeartbeat(
@@ -2351,7 +2398,10 @@ class SentinelService : Service() {
         aiOutput: String,
         inputTokens: Int,
         outputTokens: Int,
-        finalStatus: String
+        finalStatus: String,
+        modelIdUsed: String?,
+        runtime: String,
+        runtimeAcceleration: String
     ): Boolean {
         Log.d("EdgeSwarm", "Uploading payload to: $gcpUploadUrl")
 
@@ -2409,6 +2459,23 @@ class SentinelService : Service() {
                 .put("inputTokens", inputTokens)
                 .put("outputTokens", outputTokens)
                 .put("tokenCountMethod", "char_estimate_v1")
+                .put(
+                    "model_id_used",
+                    modelIdUsed ?: JSONObject.NULL
+                )
+                .put(
+                    "modelIdUsed",
+                    modelIdUsed ?: JSONObject.NULL
+                )
+                .put("runtime", runtime)
+                .put(
+                    "runtime_acceleration",
+                    runtimeAcceleration
+                )
+                .put(
+                    "runtimeAcceleration",
+                    runtimeAcceleration
+                )
 
             val rootJson = JSONObject()
                 .put("fileHash", properFileHash)
@@ -2424,7 +2491,10 @@ class SentinelService : Service() {
                 "EdgeSwarm",
                 "Task output prepared -> taskId=$taskId " +
                     "status=$finalStatus bytes=${aiOutput.toByteArray().size} " +
-                    "sha256=$properFileHash"
+                    "sha256=$properFileHash " +
+                    "modelIdUsed=${modelIdUsed ?: "none"} " +
+                    "runtime=$runtime " +
+                    "acceleration=$runtimeAcceleration"
             )
 
             if (BuildConfig.DEBUG) {
