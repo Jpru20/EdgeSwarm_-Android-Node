@@ -23,6 +23,7 @@ import com.google.android.gms.tasks.Tasks
 import com.google.android.play.core.integrity.IntegrityManagerFactory
 import com.google.android.play.core.integrity.IntegrityTokenRequest
 import io.github.jan.supabase.auth.auth
+import java.io.File
 import java.io.FileInputStream
 import java.io.IOException
 import java.net.URLEncoder
@@ -73,11 +74,29 @@ class SentinelService : Service() {
             "sentinel_node"
         private const val NOTIFICATION_ID = 1001
 
+        private const val NODE_SETTINGS_PREFS =
+            "EdgeSwarmNodeSettings"
+        private const val APP_PREFS =
+            "EdgePrefs"
+        private const val PREF_NODE_ENABLED =
+            "node_enabled"
+
         private val mutableRunningState =
             MutableStateFlow(false)
 
         val runningState: StateFlow<Boolean> =
             mutableRunningState.asStateFlow()
+
+        // ANDROID_LEVEL2_UI_STATE_FLOW_V1
+        private val mutableLevel2StatusState =
+            MutableStateFlow<String?>(null)
+
+        val level2StatusState: StateFlow<String?> =
+            mutableLevel2StatusState.asStateFlow()
+
+        private fun publishLevel2Status(status: String?) {
+            mutableLevel2StatusState.value = status
+        }
 
         var isServiceRunning: Boolean
             get() = mutableRunningState.value
@@ -94,7 +113,11 @@ class SentinelService : Service() {
     private val appType = "android"
     // The execution loop is serial, so advertise the real capacity to the scheduler.
     private val androidConcurrencyLimit = 1
-    private val pollIntervalMs = 2_000L
+
+    // ANDROID_MOBILE_RESOURCE_GOVERNOR_V1
+    // Reduce control-plane activity while the user is using the phone.
+    private val idlePollIntervalMs = 5_000L
+    private val interactivePollIntervalMs = 10_000L
 
     private val gcpBaseUrl = EdgeSwarmConfig.apiBaseUrl
     private val gcpUploadUrl = "$gcpBaseUrl/enterprise/submit-result"
@@ -123,10 +146,20 @@ class SentinelService : Service() {
     private var level2ActiveBackend: String? = null
 
     @Volatile
+    private var level2ActiveModelPath: String? = null
+
+    @Volatile
+    private var level2ActiveBackendType:
+        AndroidLevel2Backend? = null
+
+    @Volatile
     private var level2LastError: String? = null
 
-private var lastHeartbeatAtMs = 0L
-    private val heartbeatIntervalMs = 5_000L
+    @Volatile
+    private var lastThermalConstrained = false
+
+    private var lastHeartbeatAtMs = 0L
+    private val heartbeatIntervalMs = 15_000L
     private var nodeWalletAddress: String? = null
     private var heartbeatIdentityLogged = false
 
@@ -138,41 +171,54 @@ private var lastHeartbeatAtMs = 0L
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    override fun onStartCommand(
-        intent: Intent?,
-        flags: Int,
-        startId: Int
-    ): Int {
-        if (intent?.action == ACTION_STOP_NODE) {
-            Log.d("EdgeSwarm", "Node stop requested from notification.")
-            stopSelf()
-            return START_NOT_STICKY
-        }
+    private fun setNodeEnabledPreference(
+        enabled: Boolean
+    ) {
+        getSharedPreferences(
+            NODE_SETTINGS_PREFS,
+            MODE_PRIVATE
+        ).edit()
+            .putBoolean(
+                PREF_NODE_ENABLED,
+                enabled
+            )
+            .apply()
+    }
 
-        if (isServiceRunning) return START_NOT_STICKY
-
+    private fun createNodeNotificationChannel() {
         val notificationManager =
-            getSystemService(NotificationManager::class.java)
+            getSystemService(
+                NotificationManager::class.java
+            )
 
         val channel = NotificationChannel(
             NOTIFICATION_CHANNEL_ID,
-            "Edge Swarm Node",
+            "EdgeSwarm Node",
             NotificationManager.IMPORTANCE_LOW
         ).apply {
             description =
-                "Shows when this device is contributing deterministic work."
+                "Shows when this device is available to the EdgeSwarm network."
             setShowBadge(false)
         }
 
-        notificationManager.createNotificationChannel(channel)
+        notificationManager.createNotificationChannel(
+            channel
+        )
+    }
 
+    private fun buildNodeNotification(
+        statusText: String
+    ): Notification {
         val openAppIntent = PendingIntent.getActivity(
             this,
             0,
-            Intent(this, MainActivity::class.java).apply {
-                this.flags =
+            Intent(
+                this,
+                MainActivity::class.java
+            ).apply {
+                flags =
                     Intent.FLAG_ACTIVITY_CLEAR_TOP or
-                    Intent.FLAG_ACTIVITY_SINGLE_TOP
+                        Intent.FLAG_ACTIVITY_SINGLE_TOP
             },
             PendingIntent.FLAG_UPDATE_CURRENT or
                 PendingIntent.FLAG_IMMUTABLE
@@ -181,63 +227,311 @@ private var lastHeartbeatAtMs = 0L
         val stopNodeIntent = PendingIntent.getService(
             this,
             1,
-            Intent(this, SentinelService::class.java).apply {
+            Intent(
+                this,
+                SentinelService::class.java
+            ).apply {
                 action = ACTION_STOP_NODE
             },
             PendingIntent.FLAG_UPDATE_CURRENT or
                 PendingIntent.FLAG_IMMUTABLE
         )
 
-        val notification = Notification.Builder(
+        return Notification.Builder(
             this,
             NOTIFICATION_CHANNEL_ID
         )
-            .setContentTitle("Edge Swarm Node")
-            .setContentText("Level 1 deterministic node is active.")
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentTitle("EdgeSwarm Node")
+            .setContentText(statusText)
+            .setSmallIcon(
+                android.R.drawable.ic_dialog_info
+            )
             .setContentIntent(openAppIntent)
             .setOngoing(true)
-            .setCategory(Notification.CATEGORY_SERVICE)
+            .setOnlyAlertOnce(true)
+            .setCategory(
+                Notification.CATEGORY_SERVICE
+            )
             .addAction(
                 Notification.Action.Builder(
                     Icon.createWithResource(
                         this,
-                        android.R.drawable.ic_menu_close_clear_cancel
+                        android.R.drawable
+                            .ic_menu_close_clear_cancel
                     ),
                     "Deactivate",
                     stopNodeIntent
                 ).build()
             )
             .build()
+    }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+    private fun startNodeForeground(
+        notification: Notification
+    ) {
+        if (
+            Build.VERSION.SDK_INT >=
+                Build.VERSION_CODES.UPSIDE_DOWN_CAKE
+        ) {
             startForeground(
                 NOTIFICATION_ID,
                 notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                ServiceInfo
+                    .FOREGROUND_SERVICE_TYPE_SPECIAL_USE
             )
         } else {
-            startForeground(NOTIFICATION_ID, notification)
+            startForeground(
+                NOTIFICATION_ID,
+                notification
+            )
+        }
+    }
+
+    private fun updateNodeNotification(
+        statusText: String
+    ) {
+        getSystemService(
+            NotificationManager::class.java
+        ).notify(
+            NOTIFICATION_ID,
+            buildNodeNotification(statusText)
+        )
+    }
+
+    private fun isThermallyConstrained(): Boolean {
+        if (
+            Build.VERSION.SDK_INT <
+                Build.VERSION_CODES.Q
+        ) {
+            return false
         }
 
-        val userEmail = intent
-            ?.getStringExtra("USER_EMAIL")
-            ?.trim()
-            .orEmpty()
-        val suppliedAccessToken = intent?.getStringExtra("ACCESS_TOKEN")?.trim().orEmpty()
+        val powerManager =
+            getSystemService(
+                POWER_SERVICE
+            ) as PowerManager
 
-        if (userEmail.isBlank() || suppliedAccessToken.isBlank()) {
-            Log.e("EdgeSwarm", "Node activation rejected: authenticated provider session is missing.")
+        return powerManager.currentThermalStatus >=
+            PowerManager.THERMAL_STATUS_MODERATE
+    }
+
+    private fun currentPollIntervalMs(): Long {
+        val powerManager =
+            getSystemService(
+                POWER_SERVICE
+            ) as PowerManager
+
+        return if (powerManager.isInteractive) {
+            interactivePollIntervalMs
+        } else {
+            idlePollIntervalMs
+        }
+    }
+
+    private fun currentIdleNotificationText(): String {
+        return when {
+            allowNeuralTasks &&
+                level2SelfTestPassed &&
+                isThermallyConstrained() ->
+                "Level 2 paused while the device cools"
+
+            isLevel2Ready() ->
+                "Level 2 - Gemma 4 E2B - " +
+                    (
+                        level2ActiveBackend
+                            ?.uppercase()
+                            ?: "READY"
+                    )
+
+            allowNeuralTasks &&
+                level2LastError == null ->
+                "Preparing Level 2 - Gemma 4 E2B"
+
+            allowNeuralTasks ->
+                "Level 1 active - Level 2 unavailable"
+
+            else ->
+                "Level 1 deterministic node is active"
+        }
+    }
+
+    override fun onStartCommand(
+        intent: Intent?,
+        flags: Int,
+        startId: Int
+    ): Int {
+        if (intent?.action == ACTION_STOP_NODE) {
+            Log.d(
+                "EdgeSwarm",
+                "Node stop requested from notification."
+            )
+            setNodeEnabledPreference(false)
+            isServiceRunning = false
             stopSelf()
             return START_NOT_STICKY
         }
 
-        initialAccessToken = suppliedAccessToken
-        allowComputeTasks = intent?.getBooleanExtra("ALLOW_COMPUTE", true) ?: true
-        allowScrapingTasks = intent?.getBooleanExtra("ALLOW_SCRAPING", true) ?: true
-        allowBatteryTasks = intent?.getBooleanExtra("ALLOW_BATTERY_TASKS", true) ?: true
+        if (isServiceRunning) {
+            return START_STICKY
+        }
+
+        createNodeNotificationChannel()
+
+        startNodeForeground(
+            buildNodeNotification(
+                "Node is starting..."
+            )
+        )
+
+        val nodeSettings =
+            getSharedPreferences(
+                NODE_SETTINGS_PREFS,
+                MODE_PRIVATE
+            )
+
+        val appPreferences =
+            getSharedPreferences(
+                APP_PREFS,
+                MODE_PRIVATE
+            )
+
+        val savedNodeEnabled =
+            nodeSettings.getBoolean(
+                PREF_NODE_ENABLED,
+                false
+            )
+
+        if (
+            intent == null &&
+            !savedNodeEnabled
+        ) {
+            Log.i(
+                "EdgeSwarm",
+                "Sticky restart ignored because the node was not user-enabled."
+            )
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
+        val userEmail =
+            intent
+                ?.getStringExtra("USER_EMAIL")
+                ?.trim()
+                ?.takeIf(String::isNotEmpty)
+                ?: appPreferences
+                    .getString(
+                        "auth_email",
+                        null
+                    )
+                    ?.trim()
+                    .orEmpty()
+
+        val suppliedAccessToken =
+            intent
+                ?.getStringExtra("ACCESS_TOKEN")
+                ?.trim()
+                .orEmpty()
+
+        val restoredSessionToken =
+            runCatching {
+                supabase.auth
+                    .currentSessionOrNull()
+                    ?.accessToken
+            }
+                .getOrNull()
+                ?.trim()
+                .orEmpty()
+
+        val resolvedAccessToken =
+            suppliedAccessToken.ifBlank {
+                restoredSessionToken
+            }
+
+        if (
+            userEmail.isBlank() ||
+            resolvedAccessToken.isBlank()
+        ) {
+            Log.e(
+                "EdgeSwarm",
+                "Node activation rejected: authenticated provider session is missing."
+            )
+            setNodeEnabledPreference(false)
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
+        initialAccessToken =
+            resolvedAccessToken
+
+        allowComputeTasks =
+            if (
+                intent?.hasExtra(
+                    "ALLOW_COMPUTE"
+                ) == true
+            ) {
+                intent.getBooleanExtra(
+                    "ALLOW_COMPUTE",
+                    true
+                )
+            } else {
+                nodeSettings.getBoolean(
+                    "allow_compute",
+                    true
+                )
+            }
+
+        allowScrapingTasks =
+            if (
+                intent?.hasExtra(
+                    "ALLOW_SCRAPING"
+                ) == true
+            ) {
+                intent.getBooleanExtra(
+                    "ALLOW_SCRAPING",
+                    true
+                )
+            } else {
+                nodeSettings.getBoolean(
+                    "allow_scraping",
+                    true
+                )
+            }
+
+        allowBatteryTasks =
+            if (
+                intent?.hasExtra(
+                    "ALLOW_BATTERY_TASKS"
+                ) == true
+            ) {
+                intent.getBooleanExtra(
+                    "ALLOW_BATTERY_TASKS",
+                    true
+                )
+            } else {
+                nodeSettings.getBoolean(
+                    "allow_battery_tasks",
+                    true
+                )
+            }
+
         allowNeuralTasks =
-            intent?.getBooleanExtra("ALLOW_NEURAL", false) ?: false
+            if (
+                intent?.hasExtra(
+                    "ALLOW_NEURAL"
+                ) == true
+            ) {
+                intent.getBooleanExtra(
+                    "ALLOW_NEURAL",
+                    false
+                )
+            } else {
+                nodeSettings.getBoolean(
+                    "allow_neural",
+                    false
+                )
+            }
+
+        setNodeEnabledPreference(true)
 
         if (allowNeuralTasks && level2Runtime == null) {
             level2Runtime = AndroidLevel2Runtime(
@@ -250,10 +544,15 @@ private var lastHeartbeatAtMs = 0L
         }
 
         isServiceRunning = true
+
+        updateNodeNotification(
+            currentIdleNotificationText()
+        )
+
         startLevel2SelfTestIfEnabled()
         startHeadlessEngine(userEmail)
 
-        return START_NOT_STICKY
+        return START_STICKY
     }
 
     override fun onDestroy() {
@@ -265,14 +564,19 @@ private var lastHeartbeatAtMs = 0L
         isServiceRunning = false
         serviceScope.cancel()
         initialAccessToken = null
-        runCatching { level2Runtime?.close() }
+        runCatching {
+            level2Runtime?.close()
+        }
         level2Runtime = null
         allowNeuralTasks = false
         level2SelfTestPassed = false
         level2ActiveModelId = null
         level2ActiveCapability = null
         level2ActiveBackend = null
+        level2ActiveModelPath = null
+        level2ActiveBackendType = null
         level2LastError = null
+        publishLevel2Status(null)
         releaseExecutionWakeLock()
     }
 
@@ -607,7 +911,17 @@ private var lastHeartbeatAtMs = 0L
                     "EdgeSwarm",
                     "Heartbeat prepared -> hardwareId=$hardwareId " +
                         "tasks=${currentTaskIds.size} " +
-                        "battery=${batteryInfo.second ?: -1}%"
+                        "battery=${batteryInfo.second ?: -1}% " +
+                        "modelStatus=$level2ModelStatus " +
+                        "modelId=$level2ModelId " +
+                        "modelCapability=${level2ModelCapability ?: "none"} " +
+                        "edgeLevel=${if (level2Ready) 2 else 1} " +
+                        "acceleration=${if (level2Ready) {
+                            level2ActiveBackend ?: "unknown"
+                        } else {
+                            "cpu"
+                        }} " +
+                        "neural=$level2Ready"
                 )
             }
 
@@ -651,8 +965,18 @@ private var lastHeartbeatAtMs = 0L
 
     private fun startHeadlessEngine(userEmail: String) {
         serviceScope.launch {
+            runCatching {
+                android.os.Process.setThreadPriority(
+                    android.os.Process
+                        .THREAD_PRIORITY_BACKGROUND
+                )
+            }
+
             try {
-                Log.d("EdgeSwarm", "Headless Engine Booting (Level 1 CPU Mode)...")
+                Log.d(
+                    "EdgeSwarm",
+                    "Headless Engine Booting in mobile-balanced mode."
+                )
 
                 if (currentAccessToken().isNullOrBlank()) {
                     throw IllegalStateException("Authenticated provider session is unavailable.")
@@ -668,18 +992,45 @@ private var lastHeartbeatAtMs = 0L
                     Log.w("EdgeSwarm", "Wallet bind for heartbeat failed: ${e.message}")
                 }
 
-                Log.d("EdgeSwarm", "Android local model download disabled. Android production is Level 1 deterministic only.")
+                Log.d(
+                    "EdgeSwarm",
+                    "Android engine started. Level 2 activates after verified self-test."
+                )
                 maybeSendNodeHeartbeat(hardwareId, userEmail, force = true)
 
                 while (isServiceRunning) {
-                    maybeSendNodeHeartbeat(hardwareId, userEmail)
+                    val thermalConstrained =
+                        isThermallyConstrained()
+
+                    if (
+                        thermalConstrained !=
+                            lastThermalConstrained
+                    ) {
+                        lastThermalConstrained =
+                            thermalConstrained
+
+                        updateNodeNotification(
+                            currentIdleNotificationText()
+                        )
+
+                        maybeSendNodeHeartbeat(
+                            hardwareId,
+                            userEmail,
+                            force = true
+                        )
+                    }
+
+                    maybeSendNodeHeartbeat(
+                        hardwareId,
+                        userEmail
+                    )
 
                     val batteryInfo = getBatteryInfoForHeartbeat()
                     val isCharging = batteryInfo.first == true
 
                     if (!allowBatteryTasks && !isCharging) {
                         Log.d("EdgeSwarm", "Waiting for charging state because battery task mode is disabled.")
-                        delay(pollIntervalMs)
+                        delay(currentPollIntervalMs())
                         continue
                     }
 
@@ -764,7 +1115,18 @@ private var lastHeartbeatAtMs = 0L
                         maybeSendNodeHeartbeat(hardwareId, userEmail, listOf(taskId), force = true)
 
                         logTiming("task_returned_to_loop", taskId)
-                        Log.d("EdgeSwarm", "Task received -> taskId=$taskId")
+                        Log.d(
+                            "EdgeSwarm",
+                            "Task received -> taskId=$taskId"
+                        )
+
+                        updateNodeNotification(
+                            if (isNeuralTask) {
+                                "Running Level 2 inference..."
+                            } else {
+                                "Processing EdgeSwarm task..."
+                            }
+                        )
 
                         var aiOutput = ""
                         var isError = false
@@ -908,13 +1270,7 @@ private var lastHeartbeatAtMs = 0L
                                 }
 
                                 val readyRuntime =
-                                    level2Runtime?.takeIf {
-                                        allowNeuralTasks &&
-                                            level2SelfTestPassed &&
-                                            it.isReady
-                                    } ?: throw IllegalStateException(
-                                        "Android Level 2 runtime is not ready."
-                                    )
+                                    prepareLevel2RuntimeForTask()
 
                                 val inferenceStartedAt =
                                     SystemClock.elapsedRealtime()
@@ -925,7 +1281,19 @@ private var lastHeartbeatAtMs = 0L
                                 )
 
                                 val neuralResult =
-                                    readyRuntime.generate(prompt)
+                                    try {
+                                        readyRuntime.generate(
+                                            prompt
+                                        )
+                                    } finally {
+                                        runCatching {
+                                            readyRuntime.close()
+                                        }
+
+                                        updateNodeNotification(
+                                            currentIdleNotificationText()
+                                        )
+                                    }
 
                                 val inferenceLatencyMs =
                                     SystemClock.elapsedRealtime() -
@@ -995,9 +1363,14 @@ private var lastHeartbeatAtMs = 0L
                             emptyList(),
                             force = true
                         )
+
+                        updateNodeNotification(
+                            currentIdleNotificationText()
+                        )
+
                         releaseExecutionWakeLock()
                     }
-                    delay(pollIntervalMs)
+                    delay(currentPollIntervalMs())
                 }
             } catch (e: CancellationException) {
                 Log.d("EdgeSwarm", "Engine loop stopped normally.")
@@ -2151,6 +2524,9 @@ private var lastHeartbeatAtMs = 0L
 
     private fun startLevel2SelfTestIfEnabled() {
         if (!allowNeuralTasks) {
+            updateNodeNotification(
+                currentIdleNotificationText()
+            )
             return
         }
 
@@ -2160,7 +2536,17 @@ private var lastHeartbeatAtMs = 0L
         level2ActiveModelId = null
         level2ActiveCapability = null
         level2ActiveBackend = null
+        level2ActiveModelPath = null
+        level2ActiveBackendType = null
         level2LastError = null
+
+        publishLevel2Status(
+            "Running Gemma 4 Tensor G5 NPU self-test..."
+        )
+
+        updateNodeNotification(
+            "Preparing Level 2 - Gemma 4 E2B"
+        )
 
         serviceScope.launch(Dispatchers.IO) {
             try {
@@ -2180,11 +2566,33 @@ private var lastHeartbeatAtMs = 0L
                 }
 
                 level2SelfTestPassed = true
-                level2ActiveModelId = result.modelId
-                level2ActiveCapability = result.capability
+                level2ActiveModelId =
+                    result.modelId
+                level2ActiveCapability =
+                    result.capability
                 level2ActiveBackend =
                     result.backend.telemetryName
+                level2ActiveModelPath =
+                    result.modelFilePath
+                level2ActiveBackendType =
+                    result.backend
                 level2LastError = null
+
+                // MOBILE_COLD_READY_LEVEL2_V1
+                // Preserve verified eligibility while releasing
+                // the large LiteRT-LM engine during idle time.
+                runCatching {
+                    runtime.close()
+                }
+
+                publishLevel2Status(
+                    "Level 2 ready - Gemma 4 E2B - " +
+                        "${result.backend.telemetryName.uppercase()}"
+                )
+
+                updateNodeNotification(
+                    currentIdleNotificationText()
+                )
 
                 Log.i(
                     "EdgeSwarm",
@@ -2204,10 +2612,26 @@ private var lastHeartbeatAtMs = 0L
                 level2ActiveModelId = null
                 level2ActiveCapability = null
                 level2ActiveBackend = null
+                level2ActiveModelPath = null
+                level2ActiveBackendType = null
                 level2LastError =
                     error.message ?: error.javaClass.simpleName
 
-                runCatching { runtime.close() }
+                publishLevel2Status(
+                    "Level 2 self-test failed: " +
+                        (
+                            error.message
+                                ?: error.javaClass.simpleName
+                        )
+                )
+
+                updateNodeNotification(
+                    currentIdleNotificationText()
+                )
+
+                runCatching {
+                    runtime.close()
+                }
 
                 Log.e(
                     "EdgeSwarm",
@@ -2272,11 +2696,70 @@ private var lastHeartbeatAtMs = 0L
         }
     }
 
+    private fun prepareLevel2RuntimeForTask():
+        AndroidLevel2Runtime {
+        check(isLevel2Ready()) {
+            "Android Level 2 is not currently eligible."
+        }
+
+        val modelPath =
+            level2ActiveModelPath
+                ?: error(
+                    "Verified Android Level 2 model path is unavailable."
+                )
+
+        val backend =
+            level2ActiveBackendType
+                ?: error(
+                    "Verified Android Level 2 backend is unavailable."
+                )
+
+        val runtime =
+            level2Runtime
+                ?: AndroidLevel2Runtime(
+                    cacheDir =
+                        filesDir.resolve(
+                            "level2_litert_lm_cache"
+                        )
+                ).also {
+                    level2Runtime = it
+                }
+
+        if (!runtime.isReady) {
+            runtime.initialize(
+                modelFile = File(modelPath),
+                backend = backend,
+                maxNumTokens =
+                    if (
+                        backend ==
+                            AndroidLevel2Backend.NPU
+                    ) {
+                        1024
+                    } else {
+                        2048
+                    },
+                nativeLibraryDir =
+                    if (
+                        backend ==
+                            AndroidLevel2Backend.NPU
+                    ) {
+                        applicationInfo.nativeLibraryDir
+                    } else {
+                        null
+                    }
+            )
+        }
+
+        return runtime
+    }
+
     private fun isLevel2Ready(): Boolean {
         return allowNeuralTasks &&
             level2SelfTestPassed &&
-            level2Runtime?.isReady == true &&
+            !isThermallyConstrained() &&
             !level2ActiveModelId.isNullOrBlank() &&
+            !level2ActiveModelPath.isNullOrBlank() &&
+            level2ActiveBackendType != null &&
             level2ActiveCapability.equals(
                 "Neural-Inference-3B",
                 ignoreCase = true

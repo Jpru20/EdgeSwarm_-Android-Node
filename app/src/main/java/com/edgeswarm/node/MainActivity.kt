@@ -208,6 +208,16 @@ class MainActivity : ComponentActivity() {
                                     userEmail = authenticatedUserEmail,
                                     onSignOut = {
                                         scope.launch {
+                                            context.getSharedPreferences(
+                                                "EdgeSwarmNodeSettings",
+                                                MODE_PRIVATE
+                                            ).edit()
+                                                .putBoolean(
+                                                    "node_enabled",
+                                                    false
+                                                )
+                                                .apply()
+
                                             context.stopService(
                                                 Intent(
                                                     context,
@@ -1024,6 +1034,8 @@ fun SentinelScreen(
 ) {
     val context = LocalContext.current
     val isRunning by SentinelService.runningState.collectAsState()
+    val serviceLevel2StatusText by
+        SentinelService.level2StatusState.collectAsState()
 
     val nodeSettings = remember(context) {
         context.getSharedPreferences(
@@ -1395,7 +1407,9 @@ fun SentinelScreen(
 
                 RoutingSwitchRow(
                     title = "Level 2 Neural Inference",
-                    subtitle = level2StatusText,
+                    subtitle =
+                        serviceLevel2StatusText
+                            ?: level2StatusText,
                     checked = allowNeuralTasks,
                     enabled =
                         !isRunning &&
@@ -1442,9 +1456,9 @@ fun SentinelScreen(
 
         Text(
             text =
-                "Android may stop data-sync foreground services after " +
-                    "the system quota is reached. The node shuts down " +
-                    "cleanly and can be reactivated later.",
+                "EdgeSwarm runs as a user-controlled foreground node. " +
+                    "Android may restore it after reclaiming the process " +
+                    "while the node remains activated.",
             color = Color.Gray,
             fontSize = 10.sp,
             textAlign = TextAlign.Center
@@ -1505,12 +1519,25 @@ fun SentinelScreen(
                                 allowNeuralTasks
                             )
 
+                            nodeSettings.edit()
+                                .putBoolean(
+                                    "node_enabled",
+                                    true
+                                )
+                                .apply()
+
                             runCatching {
                                 ContextCompat.startForegroundService(
                                     context,
                                     serviceIntent
                                 )
                             }.onFailure { error ->
+                                nodeSettings.edit()
+                                    .putBoolean(
+                                        "node_enabled",
+                                        false
+                                    )
+                                    .apply()
                                 Toast.makeText(
                                     context,
                                     "Node activation failed: ${error.message}",
@@ -1520,7 +1547,16 @@ fun SentinelScreen(
                         }
                     }
                 } else {
-                    context.stopService(serviceIntent)
+                    nodeSettings.edit()
+                        .putBoolean(
+                            "node_enabled",
+                            false
+                        )
+                        .apply()
+
+                    context.stopService(
+                        serviceIntent
+                    )
                 }
             },
             modifier = Modifier

@@ -109,6 +109,17 @@ android {
     }
 
     packaging {
+        // TENSOR_G5_DISPATCH_NATIVE_EXTRACTION_V1
+        // LiteRT scans applicationInfo.nativeLibraryDir for the
+        // Google Tensor dispatch runtime, so these libraries must
+        // exist as physical extracted files after installation.
+        jniLibs {
+            useLegacyPackaging = true
+            pickFirsts.add("**/libLiteRt.so")
+            pickFirsts.add("**/libLiteRtDispatch_GoogleTensor.so")
+            pickFirsts.add("**/libLiteRtClGlAccelerator.so")
+        }
+
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
             excludes +=
@@ -116,6 +127,13 @@ android {
                 "NOTICE,NOTICE.txt,notice.txt,ASL2.0,*.kotlin_module}"
         }
     }
+}
+
+configurations.all {
+    exclude(
+        group = "com.google.ai.edge.litert",
+        module = "litert-api"
+    )
 }
 
 dependencies {
@@ -145,5 +163,7 @@ dependencies {
     implementation("io.ktor:ktor-client-okhttp:3.0.0")
 
     // ANDROID_LEVEL2_LITERT_LM_RUNTIME_V1
-    implementation("com.google.ai.edge.litertlm:litertlm-android:0.13.1")
+    // GOOGLE_PIXEL10_TPU_REFERENCE_MATRIX_V1
+    implementation("com.google.ai.edge.litertlm:litertlm-android:0.12.0")
+    implementation("com.google.ai.edge.litert:litert:2.1.5")
 }

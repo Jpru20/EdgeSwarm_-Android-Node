@@ -76,7 +76,8 @@ class AndroidLevel2Runtime(
     fun initialize(
         modelFile: File,
         backend: AndroidLevel2Backend,
-        maxNumTokens: Int = 2048
+        maxNumTokens: Int = 2048,
+        nativeLibraryDir: String? = null
     ) {
         runtimeLock.withLock {
             closeEngineLocked()
@@ -107,7 +108,22 @@ class AndroidLevel2Runtime(
                 val selectedBackend = when (backend) {
                     AndroidLevel2Backend.CPU -> Backend.CPU()
                     AndroidLevel2Backend.GPU -> Backend.GPU()
-                    AndroidLevel2Backend.NPU -> Backend.NPU()
+
+                    AndroidLevel2Backend.NPU -> {
+                        val resolvedNativeLibraryDir =
+                            nativeLibraryDir
+                                ?.trim()
+                                ?.takeIf(String::isNotEmpty)
+                                ?: throw IllegalArgumentException(
+                                    "The Android NPU backend requires " +
+                                        "applicationInfo.nativeLibraryDir."
+                                )
+
+                        Backend.NPU(
+                            nativeLibraryDir =
+                                resolvedNativeLibraryDir
+                        )
+                    }
                 }
 
                 val newEngine = Engine(
@@ -184,7 +200,8 @@ class AndroidLevel2Runtime(
                         outputTokens =
                             benchmark?.lastDecodeTokenCount ?: 0,
                         totalConversationTokens =
-                            conversation.getTokenCount(),
+                            (benchmark?.lastPrefillTokenCount ?: 0) +
+                                (benchmark?.lastDecodeTokenCount ?: 0),
                         timeToFirstTokenMs =
                             benchmark
                                 ?.timeToFirstTokenInSecond

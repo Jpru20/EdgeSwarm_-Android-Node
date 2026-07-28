@@ -1,6 +1,7 @@
-﻿package com.edgeswarm.node
+package com.edgeswarm.node
 
 import android.content.Context
+import android.util.Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -11,6 +12,7 @@ data class AndroidLevel2SelfTestResult(
     val modelId: String,
     val capability: String,
     val backend: AndroidLevel2Backend,
+    val modelFilePath: String,
     val responseText: String,
     val inputTokens: Int,
     val outputTokens: Int,
@@ -21,8 +23,13 @@ data class AndroidLevel2SelfTestResult(
 class AndroidLevel2SelfTestCoordinator(
     context: Context
 ) {
+    private val appContext = context.applicationContext
+
     private val installer =
-        AndroidLevel2ModelInstaller(context.applicationContext)
+        AndroidLevel2ModelInstaller(appContext)
+
+    private val nativeLibraryDir =
+        appContext.applicationInfo.nativeLibraryDir
 
     suspend fun initializeAndRun(
         runtime: AndroidLevel2Runtime
@@ -51,6 +58,7 @@ class AndroidLevel2SelfTestCoordinator(
                     )
 
             val backends = listOf(
+                AndroidLevel2Backend.NPU,
                 AndroidLevel2Backend.GPU,
                 AndroidLevel2Backend.CPU
             )
@@ -59,10 +67,42 @@ class AndroidLevel2SelfTestCoordinator(
 
             for (backend in backends) {
                 try {
+                    Log.i(
+                        "EdgeSwarm",
+                        "Level 2 self-test attempting backend=" +
+                            backend.telemetryName +
+                            " nativeLibraryDir=" +
+                            if (
+                                backend ==
+                                    AndroidLevel2Backend.NPU
+                            ) {
+                                nativeLibraryDir
+                            } else {
+                                "not-required"
+                            }
+                    )
+
                     runtime.initialize(
                         modelFile = modelFile,
                         backend = backend,
-                        maxNumTokens = 2048
+                        maxNumTokens =
+                            if (
+                                backend ==
+                                    AndroidLevel2Backend.NPU
+                            ) {
+                                1024
+                            } else {
+                                2048
+                            },
+                        nativeLibraryDir =
+                            if (
+                                backend ==
+                                    AndroidLevel2Backend.NPU
+                            ) {
+                                nativeLibraryDir
+                            } else {
+                                null
+                            }
                     )
 
                     val inference = runtime.generate(
@@ -84,6 +124,7 @@ class AndroidLevel2SelfTestCoordinator(
                         modelId = descriptor.id,
                         capability = descriptor.capability,
                         backend = backend,
+                        modelFilePath = modelFile.absolutePath,
                         responseText = inference.text,
                         inputTokens = inference.inputTokens,
                         outputTokens = inference.outputTokens,
@@ -96,11 +137,23 @@ class AndroidLevel2SelfTestCoordinator(
                     throw error
                 } catch (error: Throwable) {
                     lastFailure = error
+
+                    Log.w(
+                        "EdgeSwarm",
+                        "Level 2 self-test backend=" +
+                            backend.telemetryName +
+                            " failed: " +
+                            (
+                                error.message
+                                    ?: error.javaClass.simpleName
+                            ),
+                        error
+                    )
                 }
             }
 
             throw IllegalStateException(
-                "Android Level 2 failed GPU and CPU self-tests.",
+                "Android Level 2 failed NPU, GPU, and CPU self-tests.",
                 lastFailure
             )
         }
