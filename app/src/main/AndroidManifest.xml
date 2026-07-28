@@ -8,7 +8,7 @@
 
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
 
     <application
@@ -37,8 +37,13 @@
         <service
             android:name=".SentinelService"
             android:exported="false"
-            android:foregroundServiceType="dataSync"
-            android:stopWithTask="false" />
+            android:foregroundServiceType="specialUse"
+            android:stopWithTask="false">
+
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="User-activated distributed compute node that remains visibly active, polls for eligible EdgeSwarm work, and performs local deterministic or neural inference while enabled." />
+        </service>
 
         <provider
             android:name="androidx.startup.InitializationProvider"
