@@ -32,8 +32,8 @@ android {
         applicationId = "com.edgeswarm.node"
         minSdk = 26
         targetSdk = 35
-        versionCode = 160
-        versionName = "1.5.10"
+        versionCode = 162
+        versionName = "1.5.12"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         buildConfigField(
@@ -103,6 +103,10 @@ android {
         }
     }
 
+    lint {
+        disable += "NullSafeMutableLiveData"
+    }
+
     buildFeatures {
         buildConfig = true
         compose = true
@@ -143,6 +147,7 @@ dependencies {
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
     implementation("androidx.activity:activity-compose:1.8.2")
+implementation("androidx.fragment:fragment-ktx:1.6.2")
 
     implementation(platform("androidx.compose:compose-bom:2025.02.00"))
     implementation("androidx.compose.ui:ui")

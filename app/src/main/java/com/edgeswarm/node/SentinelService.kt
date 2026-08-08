@@ -43,6 +43,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -544,6 +545,7 @@ class SentinelService : Service() {
         }
 
         isServiceRunning = true
+        acquireExecutionWakeLock()
 
         updateNodeNotification(
             currentIdleNotificationText()
@@ -598,9 +600,9 @@ class SentinelService : Service() {
 
         wakeLock = powerManager.newWakeLock(
             PowerManager.PARTIAL_WAKE_LOCK,
-            "EdgeSwarm::TaskWakeLock"
+            "EdgeSwarm::NodeWakeLock"
         ).apply {
-            acquire(2L * 60L * 1000L)
+            acquire()
         }
     }
 
@@ -671,6 +673,22 @@ class SentinelService : Service() {
         }
 
         return initialAccessToken?.takeIf { it.isNotBlank() }
+    }
+
+    private fun refreshAccessTokenAfterUnauthorized(): String? {
+        return try {
+            runBlocking {
+                supabase.auth.refreshCurrentSession()
+            }
+            supabase.auth.currentSessionOrNull()?.accessToken
+                ?.trim()
+                ?.takeIf { it.isNotEmpty() }
+                ?.also { initialAccessToken = it }
+        } catch (e: Exception) {
+            Log.e("EdgeSwarm", "Supabase session refresh failed after 401: " + e.message)
+            initialAccessToken = null
+            null
+        }
     }
 
     private fun authenticatedRequestBuilder(url: String): Request.Builder {
@@ -928,18 +946,39 @@ class SentinelService : Service() {
             val body = payload
                 .toString()
                 .toRequestBody("application/json".toMediaType())
-            val request = authenticatedRequestBuilder(heartbeatUrl)
+            var request = authenticatedRequestBuilder(heartbeatUrl)
                 .post(body)
                 .build()
+            var authRefreshUsed = false
 
-            httpClient.newCall(request).execute().use { response ->
-                val responseBody = response.body?.string().orEmpty()
-                if (!response.isSuccessful) {
-                    handleTerminalControlPlaneFailure(response.code, "Heartbeat")
-                    Log.w("EdgeSwarm", "Heartbeat failed: HTTP ${response.code} - $responseBody")
-                } else {
-                    Log.d("EdgeSwarm", "Heartbeat sent.")
+            while (true) {
+                var retryAfterRefresh = false
+                httpClient.newCall(request).execute().use { response ->
+                    val responseBody = response.body?.string().orEmpty()
+
+                    if (response.isSuccessful) {
+                        Log.d("EdgeSwarm", "Heartbeat sent.")
+                        return
+                    }
+
+                    if (response.code == 401 && !authRefreshUsed) {
+                        authRefreshUsed = true
+                        if (refreshAccessTokenAfterUnauthorized() != null) {
+                            request = authenticatedRequestBuilder(heartbeatUrl)
+                                .post(body)
+                                .build()
+                            retryAfterRefresh = true
+                            Log.w("EdgeSwarm", "Heartbeat bearer refreshed; retrying once.")
+                        }
+                    }
+
+                    if (!retryAfterRefresh) {
+                        handleTerminalControlPlaneFailure(response.code, "Heartbeat")
+                        Log.w("EdgeSwarm", "Heartbeat failed: HTTP " + response.code + " - " + responseBody)
+                    }
                 }
+
+                if (!retryAfterRefresh) return
             }
         } catch (e: Exception) {
             Log.w("EdgeSwarm", "Heartbeat error: ${e.message}")
@@ -1130,7 +1169,6 @@ class SentinelService : Service() {
 
                         var aiOutput = ""
                         var isError = false
-                        acquireExecutionWakeLock()
                         val start = SystemClock.elapsedRealtime()
                         logTiming("execution_start", taskId)
 
@@ -1415,7 +1453,6 @@ class SentinelService : Service() {
                             currentIdleNotificationText()
                         )
 
-                        releaseExecutionWakeLock()
                     }
                     delay(currentPollIntervalMs())
                 }
@@ -2506,6 +2543,7 @@ class SentinelService : Service() {
             }
 
             val maxAttempts = 3
+            var authRefreshUsed = false
 
             for (attempt in 1..maxAttempts) {
                 val request = authenticatedRequestBuilder(
@@ -2526,7 +2564,8 @@ class SentinelService : Service() {
                             SystemClock.elapsedRealtime() -
                                 uploadStartedAt
 
-                        val responseText =
+                        var responseCode = response.code
+                        var responseText =
                             response.body?.string().orEmpty()
 
                         logTiming(
@@ -2546,8 +2585,48 @@ class SentinelService : Service() {
                             return true
                         }
 
+                        if (response.code == 401 && !authRefreshUsed) {
+                            authRefreshUsed = true
+                            if (refreshAccessTokenAfterUnauthorized() != null) {
+                                val authRetryRequest =
+                                    authenticatedRequestBuilder(
+                                        gcpUploadUrl
+                                    )
+                                        .post(requestBody)
+                                        .build()
+
+                                Log.w(
+                                    "EdgeSwarm",
+                                    "Result upload bearer refreshed; retrying once."
+                                )
+
+                                httpClient.newCall(authRetryRequest)
+                                    .execute()
+                                    .use { authRetryResponse ->
+                                        responseCode =
+                                            authRetryResponse.code
+                                        responseText =
+                                            authRetryResponse.body
+                                                ?.string()
+                                                .orEmpty()
+
+                                        Log.d(
+                                            "EdgeSwarm",
+                                            "Upload auth retry: " +
+                                                authRetryResponse.code +
+                                                " - " +
+                                                authRetryResponse.message
+                                        )
+
+                                        if (authRetryResponse.isSuccessful) {
+                                            return true
+                                        }
+                                    }
+                            }
+                        }
+
                         handleTerminalControlPlaneFailure(
-                            response.code,
+                            responseCode,
                             "Result upload"
                         )
 
@@ -2557,10 +2636,10 @@ class SentinelService : Service() {
                         )
 
                         val retryable =
-                            response.code == 408 ||
-                            response.code == 425 ||
-                            response.code == 429 ||
-                            response.code in 500..599
+                            responseCode == 408 ||
+                            responseCode == 425 ||
+                            responseCode == 429 ||
+                            responseCode in 500..599
 
                         if (!retryable || attempt == maxAttempts) {
                             return false
@@ -2730,34 +2809,54 @@ class SentinelService : Service() {
                     "&version=$appVersion" +
                     "&appType=$appType"
 
-            val request = authenticatedRequestBuilder(requestUrl).build()
+            var request = authenticatedRequestBuilder(requestUrl).build()
+            var authRefreshUsed = false
 
-            httpClient.newCall(request).execute().use { response ->
-                val elapsed = SystemClock.elapsedRealtime() - pollStartedAt
-                val responseText = response.body?.string().orEmpty()
-                logTiming("poll_response_received", elapsedMs = elapsed)
+            for (authAttempt in 0..1) {
+                var retryAfterRefresh = false
 
-                if (!response.isSuccessful) {
-                    handleTerminalControlPlaneFailure(response.code, "Task polling")
-                    Log.w("EdgeSwarm", "Fetch task failed: HTTP ${response.code} - $responseText")
-                    return null
-                }
+                httpClient.newCall(request).execute().use { response ->
+                    val elapsed = SystemClock.elapsedRealtime() - pollStartedAt
+                    val responseText = response.body?.string().orEmpty()
+                    logTiming("poll_response_received", elapsedMs = elapsed)
 
-                val json = JSONObject(responseText.ifBlank { "{}" })
+                    if (!response.isSuccessful) {
+                        if (response.code == 401 && !authRefreshUsed) {
+                            authRefreshUsed = true
+                            if (refreshAccessTokenAfterUnauthorized() != null) {
+                                request = authenticatedRequestBuilder(requestUrl).build()
+                                retryAfterRefresh = true
+                                Log.w("EdgeSwarm", "Task polling bearer refreshed; retrying once.")
+                            }
+                        }
 
-                if (json.has("task") && !json.isNull("task")) {
-                    return json.getJSONObject("task")
-                }
+                        if (!retryAfterRefresh) {
+                            handleTerminalControlPlaneFailure(response.code, "Task polling")
+                            Log.w("EdgeSwarm", "Fetch task failed: HTTP " + response.code + " - " + responseText)
+                            return null
+                        }
+                    } else {
+                        val json = JSONObject(responseText.ifBlank { "{}" })
 
-                if (json.has("tasks") && !json.isNull("tasks")) {
-                    val tasks = json.getJSONArray("tasks")
-                    if (tasks.length() > 0) {
-                        return tasks.getJSONObject(0)
+                        if (json.has("task") && !json.isNull("task")) {
+                            return json.getJSONObject("task")
+                        }
+
+                        if (json.has("tasks") && !json.isNull("tasks")) {
+                            val tasks = json.getJSONArray("tasks")
+                            if (tasks.length() > 0) {
+                                return tasks.getJSONObject(0)
+                            }
+                        }
+
+                        return null
                     }
                 }
 
-                null
+                if (!retryAfterRefresh) return null
             }
+
+            null
         } catch (e: Exception) {
             val elapsed = SystemClock.elapsedRealtime() - pollStartedAt
             logTiming("poll_request_failed", elapsedMs = elapsed)
