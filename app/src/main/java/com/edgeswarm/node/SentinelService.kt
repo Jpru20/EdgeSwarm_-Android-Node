@@ -662,10 +662,90 @@ class SentinelService : Service() {
             Settings.Secure.ANDROID_ID
         ).orEmpty()
 
-        // Preserve the existing Android node identity format so current
-        // attestations and provider-node links do not silently fork.
+        // Retained only as migration material for pre-unified Android IDs.
         val suffix = androidId.take(6).ifBlank { "local" }
         return "${deviceName}_${suffix}"
+    }
+
+    // ANDROID_UNIFIED_HARDWARE_IDENTITY_V1
+    private fun unifiedAndroidHardwareIdV1(
+        previousHardwareId: String
+    ): String {
+        val source = "android_legacy_device_scoped_v1"
+        val lf = 10.toChar()
+
+        val canonical =
+            "edgeswarm-hardware-id-v1" +
+                lf +
+                source +
+                lf +
+                previousHardwareId.lowercase()
+
+        val hardwareId = java.security.MessageDigest
+            .getInstance("SHA-256")
+            .digest(canonical.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+
+        check(Regex("^[a-f0-9]{64}$").matches(hardwareId)) {
+            "Unified Android hardware identity derivation failed."
+        }
+
+        return hardwareId
+    }
+
+    // Persist the unified ID so service/app restarts do not regenerate
+    // node identity or repeat a completed legacy migration.
+    private fun persistedUnifiedHardwareIdV1(): String? {
+        val value = getSharedPreferences(
+            APP_PREFS,
+            MODE_PRIVATE
+        ).getString(
+            "unified_hardware_id_v1",
+            null
+        )?.trim()?.lowercase()
+
+        return value?.takeIf {
+            Regex("^[a-f0-9]{64}$").matches(it)
+        }
+    }
+
+    private fun persistUnifiedHardwareIdV1(
+        hardwareId: String
+    ) {
+        check(
+            Regex("^[a-f0-9]{64}$").matches(hardwareId)
+        )
+
+        getSharedPreferences(
+            APP_PREFS,
+            MODE_PRIVATE
+        ).edit()
+            .putString(
+                "unified_hardware_id_v1",
+                hardwareId
+            )
+            .apply()
+    }
+
+    private fun hardwareIdentityMigrationCompletedV1(): Boolean =
+        getSharedPreferences(
+            APP_PREFS,
+            MODE_PRIVATE
+        ).getBoolean(
+            "hardware_identity_migration_v1_completed",
+            false
+        )
+
+    private fun markHardwareIdentityMigrationCompletedV1() {
+        getSharedPreferences(
+            APP_PREFS,
+            MODE_PRIVATE
+        ).edit()
+            .putBoolean(
+                "hardware_identity_migration_v1_completed",
+                true
+            )
+            .apply()
     }
 
     private fun currentAccessToken(): String? {
@@ -789,6 +869,9 @@ class SentinelService : Service() {
             "unavailable"
         }
     }
+
+    @Volatile
+    private var previousHardwareIdForMigrationV1: String? = null
 
     private fun sendNodeHeartbeat(
         hardwareId: String,
@@ -929,6 +1012,23 @@ class SentinelService : Service() {
                 .put("playIntegrityMode", "classic_nonce_v1")
                 .put("debugBuild", BuildConfig.DEBUG)
 
+            val migrationHardwareId =
+                previousHardwareIdForMigrationV1
+                    ?.takeIf {
+                        !hardwareIdentityMigrationCompletedV1() &&
+                            !it.equals(hardwareId, ignoreCase = true)
+                    }
+
+            if (migrationHardwareId != null) {
+                payload.put(
+                    "previousHardwareId",
+                    migrationHardwareId
+                )
+            }
+
+            val migrationWasRequested =
+                migrationHardwareId != null
+
             if (!heartbeatIdentityLogged) {
                 Log.d(
                     "EdgeSwarm",
@@ -968,6 +1068,14 @@ class SentinelService : Service() {
                     val responseBody = response.body?.string().orEmpty()
 
                     if (response.isSuccessful) {
+                        if (migrationWasRequested) {
+                            markHardwareIdentityMigrationCompletedV1()
+                            Log.i(
+                                "EdgeSwarm",
+                                "ANDROID_HARDWARE_IDENTITY_MIGRATION_V1 accepted and persisted."
+                            )
+                        }
+
                         Log.d("EdgeSwarm", "Heartbeat sent.")
                         return
                     }
@@ -1032,7 +1140,19 @@ class SentinelService : Service() {
                     throw IllegalStateException("Authenticated provider session is unavailable.")
                 }
 
-                val hardwareId = legacyCompatibleHardwareId()
+                val previousHardwareId =
+                    legacyCompatibleHardwareId()
+
+                val hardwareId =
+                    persistedUnifiedHardwareIdV1()
+                        ?: unifiedAndroidHardwareIdV1(
+                            previousHardwareId
+                        ).also {
+                            persistUnifiedHardwareIdV1(it)
+                        }
+
+                previousHardwareIdForMigrationV1 =
+                    previousHardwareId
 
                 try {
                     nodeWalletAddress = getNodeCredentials(userEmail).address
