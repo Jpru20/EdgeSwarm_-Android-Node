@@ -112,8 +112,13 @@ class SentinelService : Service() {
 
     private val appVersion = BuildConfig.VERSION_NAME
     private val appType = "android"
-    // The execution loop is serial, so advertise the real capacity to the scheduler.
-    private val androidConcurrencyLimit = 1
+    // Production task consumption is still serial. Keep scheduler capacity at
+    // one until the task loop itself is parallelized, while independently
+    // measuring neural hardware capacity.
+    private val androidSchedulerConcurrencyLimit = 1
+
+    @Volatile
+    private var androidCertifiedNeuralConcurrency = 0
 
     // ANDROID_MOBILE_RESOURCE_GOVERNOR_V1
     // Reduce control-plane activity while the user is using the phone.
@@ -135,7 +140,7 @@ class SentinelService : Service() {
     private var level2Runtime: AndroidLevel2Runtime? = null
 
     @Volatile
-    private var level2SelfTestPassed = false
+    private var level2CertificationPassed = false
 
     @Volatile
     private var level2ActiveModelId: String? = null
@@ -332,7 +337,7 @@ class SentinelService : Service() {
     private fun currentIdleNotificationText(): String {
         return when {
             allowNeuralTasks &&
-                level2SelfTestPassed &&
+                level2CertificationPassed &&
                 isThermallyConstrained() ->
                 "Level 2 paused while the device cools"
 
@@ -346,7 +351,7 @@ class SentinelService : Service() {
 
             allowNeuralTasks &&
                 level2LastError == null ->
-                "Preparing Level 2 - Gemma 4 E2B"
+                "Preparing certified neural runtime"
 
             allowNeuralTasks ->
                 "Level 1 active - Level 2 unavailable"
@@ -551,7 +556,7 @@ class SentinelService : Service() {
             currentIdleNotificationText()
         )
 
-        startLevel2SelfTestIfEnabled()
+        startNeuralCertificationIfEnabled()
         startHeadlessEngine(userEmail)
 
         return START_STICKY
@@ -571,7 +576,8 @@ class SentinelService : Service() {
         }
         level2Runtime = null
         allowNeuralTasks = false
-        level2SelfTestPassed = false
+        level2CertificationPassed = false
+        androidCertifiedNeuralConcurrency = 0
         level2ActiveModelId = null
         level2ActiveCapability = null
         level2ActiveBackend = null
@@ -803,8 +809,7 @@ class SentinelService : Service() {
             val eligibleModelCapabilities = JSONArray().apply {
                 if (level2Ready) {
                     put(
-                        level2ActiveCapability
-                            ?: "Neural-Inference-3B"
+                        checkNotNull(level2ActiveCapability)
                     )
                 }
             }
@@ -813,21 +818,19 @@ class SentinelService : Service() {
                 level2Ready -> "ready"
                 !allowNeuralTasks -> "not_required"
                 level2LastError != null -> "error"
-                else -> "self_test_pending"
+                else -> "certification_pending"
             }
 
             val level2ModelCapability =
                 if (level2Ready) {
-                    level2ActiveCapability
-                        ?: "Neural-Inference-3B"
+                    checkNotNull(level2ActiveCapability)
                 } else {
                     null
                 }
 
             val level2ModelId =
                 if (level2Ready) {
-                    level2ActiveModelId
-                        ?: "gemma4:e2b"
+                    checkNotNull(level2ActiveModelId)
                 } else {
                     "none"
                 }
@@ -910,7 +913,15 @@ class SentinelService : Service() {
                 .put("startedAt", java.time.Instant.ofEpochMilli(nodeStartedAtMs).toString())
                 .put("uptimeSec", ((SystemClock.elapsedRealtime() - nodeStartedElapsedMs) / 1000L).toInt())
                 .put("currentTaskIds", currentTasks)
-                .put("concurrencyLimit", androidConcurrencyLimit)
+                .put("concurrencyLimit", androidSchedulerConcurrencyLimit)
+                .put(
+                    "certifiedNeuralConcurrency",
+                    if (level2Ready) {
+                        androidCertifiedNeuralConcurrency
+                    } else {
+                        0
+                    }
+                )
                 .put("isCharging", batteryInfo.first ?: JSONObject.NULL)
                 .put("batteryPct", batteryInfo.second ?: JSONObject.NULL)
                 .put("batteryTempC", batteryTempC ?: JSONObject.NULL)
@@ -1295,16 +1306,25 @@ class SentinelService : Service() {
                                         )
                                     }
 
-                                check(
-                                    requestedCapabilities.all {
-                                        it.equals(
-                                            "Neural-Inference-3B",
-                                            ignoreCase = true
+                                val activeCapability =
+                                    level2ActiveCapability
+                                        ?: error(
+                                            "Certified Android neural capability is unavailable."
                                         )
-                                    }
+
+                                check(
+                                    requestedCapabilities.isNotEmpty() &&
+                                        requestedCapabilities.all {
+                                            it.equals(
+                                                activeCapability,
+                                                ignoreCase = true
+                                            )
+                                        }
                                 ) {
                                     "Unsupported Android neural capability: " +
-                                        requestedCapabilities.joinToString(",")
+                                        requestedCapabilities.joinToString(",") +
+                                        " certified=" +
+                                        activeCapability
                                 }
 
                                 val readyRuntime =
@@ -2671,7 +2691,7 @@ class SentinelService : Service() {
         }
     }
 
-    private fun startLevel2SelfTestIfEnabled() {
+    private fun startNeuralCertificationIfEnabled() {
         if (!allowNeuralTasks) {
             updateNodeNotification(
                 currentIdleNotificationText()
@@ -2681,7 +2701,8 @@ class SentinelService : Service() {
 
         val runtime = level2Runtime ?: return
 
-        level2SelfTestPassed = false
+        level2CertificationPassed = false
+        androidCertifiedNeuralConcurrency = 0
         level2ActiveModelId = null
         level2ActiveCapability = null
         level2ActiveBackend = null
@@ -2690,22 +2711,22 @@ class SentinelService : Service() {
         level2LastError = null
 
         publishLevel2Status(
-            "Running Gemma 4 Tensor G5 NPU self-test..."
+            "Running neural capability and slot certification..."
         )
 
         updateNodeNotification(
-            "Preparing Level 2 - Gemma 4 E2B"
+            "Preparing certified neural runtime"
         )
 
         serviceScope.launch(Dispatchers.IO) {
             try {
                 Log.i(
                     "EdgeSwarm",
-                    "Starting Android Level 2 runtime self-test."
+                    "Starting Android neural capacity certification."
                 )
 
                 val result =
-                    AndroidLevel2SelfTestCoordinator(
+                    AndroidNeuralCapacityCertificationCoordinator(
                         this@SentinelService
                     ).initializeAndRun(runtime)
 
@@ -2714,7 +2735,7 @@ class SentinelService : Service() {
                     return@launch
                 }
 
-                level2SelfTestPassed = true
+                level2CertificationPassed = true
                 level2ActiveModelId =
                     result.modelId
                 level2ActiveCapability =
@@ -2725,6 +2746,8 @@ class SentinelService : Service() {
                     result.modelFilePath
                 level2ActiveBackendType =
                     result.backend
+                androidCertifiedNeuralConcurrency =
+                    result.certifiedConcurrency
                 level2LastError = null
 
                 // MOBILE_COLD_READY_LEVEL2_V1
@@ -2735,8 +2758,9 @@ class SentinelService : Service() {
                 }
 
                 publishLevel2Status(
-                    "Level 2 ready - Gemma 4 E2B - " +
-                        "${result.backend.telemetryName.uppercase()}"
+                    "Neural ready - ${result.modelId} - " +
+                        "${result.backend.telemetryName.uppercase()} - " +
+                        "${result.certifiedConcurrency} slot(s)"
                 )
 
                 updateNodeNotification(
@@ -2745,19 +2769,21 @@ class SentinelService : Service() {
 
                 Log.i(
                     "EdgeSwarm",
-                    "Android Level 2 self-test passed: " +
+                    "Android neural certification passed: " +
                         "model=${result.modelId}, " +
                         "capability=${result.capability}, " +
                         "backend=${result.backend.telemetryName}, " +
-                        "ttftMs=${result.timeToFirstTokenMs}, " +
-                        "decodeTps=${result.decodeTokensPerSecond}, " +
-                        "inputTokens=${result.inputTokens}, " +
-                        "outputTokens=${result.outputTokens}"
+                        "certifiedConcurrency=${result.certifiedConcurrency}, " +
+                        "baselineMedianMs=${result.baselineMedianTaskMs}, " +
+                        "baselineTps=${result.baselineAggregateTokensPerSecond}, " +
+                        "certifiedMedianMs=${result.certifiedMedianTaskMs}, " +
+                        "certifiedTps=${result.certifiedAggregateTokensPerSecond}, " +
+                        "quality=${result.qualityPassRate}"
                 )
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                level2SelfTestPassed = false
+                level2CertificationPassed = false
                 level2ActiveModelId = null
                 level2ActiveCapability = null
                 level2ActiveBackend = null
@@ -2767,7 +2793,7 @@ class SentinelService : Service() {
                     error.message ?: error.javaClass.simpleName
 
                 publishLevel2Status(
-                    "Level 2 self-test failed: " +
+                    "Neural certification failed: " +
                         (
                             error.message
                                 ?: error.javaClass.simpleName
@@ -2784,7 +2810,7 @@ class SentinelService : Service() {
 
                 Log.e(
                     "EdgeSwarm",
-                    "Android Level 2 self-test failed. " +
+                    "Android neural certification failed. " +
                         "Node remains Level 1.",
                     error
                 )
@@ -2805,7 +2831,7 @@ class SentinelService : Service() {
                 "$gcpJobsUrl?hardwareId=${enc(hwId)}" +
                     "&providerEmail=${enc(providerEmail)}" +
                     "&capabilities=${enc(capabilities)}" +
-                    "&limit=$androidConcurrencyLimit" +
+                    "&limit=$androidSchedulerConcurrencyLimit" +
                     "&version=$appVersion" +
                     "&appType=$appType"
 
@@ -2924,15 +2950,16 @@ class SentinelService : Service() {
 
     private fun isLevel2Ready(): Boolean {
         return allowNeuralTasks &&
-            level2SelfTestPassed &&
+            level2CertificationPassed &&
             !isThermallyConstrained() &&
             !level2ActiveModelId.isNullOrBlank() &&
             !level2ActiveModelPath.isNullOrBlank() &&
             level2ActiveBackendType != null &&
-            level2ActiveCapability.equals(
-                "Neural-Inference-3B",
-                ignoreCase = true
-            )
+            level2ActiveCapability
+                ?.startsWith(
+                    "Neural-Inference-",
+                    ignoreCase = true
+                ) == true
     }
 
     private fun getAndroidCapabilities(): List<String> {
@@ -2948,7 +2975,9 @@ class SentinelService : Service() {
             }
 
             if (isLevel2Ready()) {
-                add("Neural-Inference-3B")
+                level2ActiveCapability
+                    ?.takeIf(String::isNotBlank)
+                    ?.let(::add)
             }
         }
     }
