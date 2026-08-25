@@ -22,7 +22,7 @@ val edgeSupabaseAnonKey =
 
 val edgeReleaseChannel =
     System.getenv("EDGESWARM_ANDROID_RELEASE_CHANNEL")
-        ?: "public_beta"
+        ?: "unified_private_beta"
 
 android {
     namespace = "com.edgeswarm.node"
@@ -32,8 +32,8 @@ android {
         applicationId = "com.edgeswarm.node"
         minSdk = 26
         targetSdk = 35
-        versionCode = 162
-        versionName = "1.5.12"
+        versionCode = 167
+        versionName = "1.5.17"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         buildConfigField(

@@ -37,6 +37,10 @@ internal object EdgeSwarmConfig {
 
     val releaseChannel: String = generatedString(
         "RELEASE_CHANNEL",
-        "public_beta"
+        "unified_private_beta"
     )
+
+    const val unifiedProtocolVersion: String = "edgeswarm-unified-heartbeat-v1"
+    const val packageType: String = "android_apk"
+    const val publicReleaseSafe: Boolean = false
 }

@@ -60,7 +60,6 @@ import org.web3j.crypto.Keys
 import java.net.URLEncoder
 import java.util.Locale
 
-private const val SWARM_REFERENCE_USD = 0.10
 private val API_BASE_URL = EdgeSwarmConfig.apiBaseUrl
 
 @Serializable
@@ -107,8 +106,9 @@ class MainActivity : ComponentActivity() {
             var isLoggedIn by remember { mutableStateOf(savedEmail != null) }
             var authenticatedUserEmail by remember { mutableStateOf(savedEmail ?: "") }
 
-            var balance by remember { mutableStateOf(sharedPrefs.getString("balance", "0.00") ?: "0.00") }
-            var usdValue by remember { mutableStateOf(sharedPrefs.getString("usd", "0.00") ?: "0.00") }
+            var earningsUsd by remember {
+                mutableStateOf(sharedPrefs.getString("earnings_usd", "0.00") ?: "0.00")
+            }
             var isSyncing by remember { mutableStateOf(false) }
             var selectedTab by remember { mutableIntStateOf(1) }
 
@@ -119,12 +119,10 @@ class MainActivity : ComponentActivity() {
                         Log.w("EdgeSwarm", "Wallet sync is not ready for $authenticatedUserEmail")
                     }
 
-                    val cachedBalance = sharedPrefs.getString("balance", "0.00") ?: "0.00"
-                    if (cachedBalance == "0.00") {
-                        val synced = refreshBalanceForUser(authenticatedUserEmail, sharedPrefs)
-                        balance = synced.first
-                        usdValue = synced.second
-                    }
+                    earningsUsd = refreshUsdEarningsForUser(
+                        authenticatedUserEmail,
+                        sharedPrefs
+                    )
                 }
             }
 
@@ -152,9 +150,10 @@ class MainActivity : ComponentActivity() {
                                 isLoggedIn = true
                                 sharedPrefs.edit().putString("auth_email", verifiedEmail).apply()
 
-                                val synced = refreshBalanceForUser(verifiedEmail, sharedPrefs)
-                                balance = synced.first
-                                usdValue = synced.second
+                                earningsUsd = refreshUsdEarningsForUser(
+                                    verifiedEmail,
+                                    sharedPrefs
+                                )
 
                                 Toast.makeText(context, "Identity and wallet synced.", Toast.LENGTH_SHORT).show()
                             }
@@ -195,12 +194,13 @@ class MainActivity : ComponentActivity() {
                         ) {
                             when (selectedTab) {
                                 0 -> LedgeScreen(authenticatedUserEmail)
-                                1 -> TokenDashboard(balance, usdValue, isSyncing) {
+                                1 -> TokenDashboard(earningsUsd, isSyncing) {
                                     isSyncing = true
                                     scope.launch {
-                                        val synced = refreshBalanceForUser(authenticatedUserEmail, sharedPrefs)
-                                        balance = synced.first
-                                        usdValue = synced.second
+                                        earningsUsd = refreshUsdEarningsForUser(
+                                            authenticatedUserEmail,
+                                            sharedPrefs
+                                        )
                                         isSyncing = false
                                     }
                                 }
@@ -240,6 +240,7 @@ class MainActivity : ComponentActivity() {
                                                 .remove("auth_email")
                                                 .remove("balance")
                                                 .remove("usd")
+                                                .remove("earnings_usd")
                                                 .apply()
 
                                             authenticatedUserEmail = ""
@@ -300,90 +301,101 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private suspend fun refreshBalanceForUser(
+    private suspend fun refreshUsdEarningsForUser(
         email: String,
         sharedPrefs: android.content.SharedPreferences
-    ): Pair<String, String> {
-        val walletAddress = getWalletAddressForEmail(email)
-        val balanceResult = fetchCloudServerBalance(walletAddress, email)
-
-        val balanceText = String.format(Locale.US, "%.2f", balanceResult)
-        val usdText = String.format(Locale.US, "%.2f", balanceResult * SWARM_REFERENCE_USD)
+    ): String {
+        val earningsUsd = fetchProviderUsdEarnings(email)
+        val earningsText = String.format(Locale.US, "%.4f", earningsUsd)
 
         sharedPrefs.edit()
-            .putString("balance", balanceText)
-            .putString("usd", usdText)
+            .putString("earnings_usd", earningsText)
+            .remove("balance")
+            .remove("usd")
             .apply()
 
-        return balanceText to usdText
+        return earningsText
     }
 
-    private fun getWalletAddressForEmail(email: String): String {
-        val privateKeyHex = runCatching { WalletVault.loadPrivateKey(this, email) }.getOrNull()
-
-        if (privateKeyHex.isNullOrBlank()) {
-            return email
-        }
-
-        return try {
-            Credentials.create(privateKeyHex).address
-        } catch (e: Exception) {
-            Log.e("EdgeSwarm", "Could not derive wallet address for $email", e)
-            email
-        }
-    }
-
-    private suspend fun fetchCloudServerBalance(walletAddress: String, email: String): Double =
+    private suspend fun fetchProviderUsdEarnings(email: String): Double =
         withContext(Dispatchers.IO) {
             val client = OkHttpClient()
             val encodedEmail = encodeUrl(email)
-
-            // Source of truth: proof ledger endpoint.
-            // This returns balance, tokenSummary, and recent proofs from proof_ledger.
-            val url = "$API_BASE_URL/v1/provider/ledge?providerEmail=$encodedEmail&limit=20&t=${System.currentTimeMillis()}"
+            val url =
+                "$API_BASE_URL/v1/provider/ledger/me" +
+                    "?providerEmail=$encodedEmail" +
+                    "&limit=20" +
+                    "&t=${System.currentTimeMillis()}"
 
             try {
-                Log.d("EdgeSwarm", "Refreshing proof ledger balance from: $url")
+                var accessToken = supabase.auth.currentSessionOrNull()
+                    ?.accessToken
+                    ?.trim()
+                    ?.takeIf { it.isNotEmpty() }
 
-                val requestBuilder = Request.Builder()
-                    .url(url)
-                    .header("Cache-Control", "no-cache")
-
-                supabase.auth.currentSessionOrNull()?.accessToken
-                    ?.takeIf { it.isNotBlank() }
-                    ?.let { requestBuilder.header("Authorization", "Bearer $it") }
-
-                val request = requestBuilder.build()
-
-                client.newCall(request).execute().use { response ->
-                    val body = response.body?.string() ?: "{}"
-
-                    if (!response.isSuccessful) {
-                        Log.w("EdgeSwarm", "Proof ledger balance failed: HTTP ${response.code} - $body")
-                        return@withContext 0.0
-                    }
-
-                    val json = JSONObject(body)
-
-                    val balance = json.optDouble("balance", Double.NaN)
-                    if (!balance.isNaN()) {
-                        Log.d("EdgeSwarm", "Proof ledger balance synced: $balance SWM")
-                        return@withContext balance
-                    }
-
-                    val tokenSummary = json.optJSONObject("tokenSummary")
-                    val totalEarned = tokenSummary?.optDouble("totalEarnedSwarm", Double.NaN) ?: Double.NaN
-                    if (!totalEarned.isNaN()) {
-                        Log.d("EdgeSwarm", "Proof ledger tokenSummary synced: $totalEarned SWM")
-                        return@withContext totalEarned
-                    }
-
-                    Log.w("EdgeSwarm", "Proof ledger balance response missing balance fields: $body")
+                if (accessToken == null) {
+                    Log.w("EdgeSwarm", "USD earnings sync skipped: authenticated session unavailable.")
                     return@withContext 0.0
                 }
-            } catch (e: Exception) {
-                Log.w("EdgeSwarm", "Proof ledger balance sync failed", e)
-                return@withContext 0.0
+
+                for (attempt in 0..1) {
+                    val request = Request.Builder()
+                        .url(url)
+                        .header("Cache-Control", "no-cache")
+                        .header("Authorization", "Bearer $accessToken")
+                        .build()
+
+                    client.newCall(request).execute().use { response ->
+                        val body = response.body?.string().orEmpty()
+
+                        if (response.code == 401 && attempt == 0) {
+                            runCatching {
+                                supabase.auth.refreshCurrentSession()
+                            }.onFailure { error ->
+                                Log.w("EdgeSwarm", "USD earnings bearer refresh failed: ${error.message}")
+                            }
+
+                            accessToken = supabase.auth.currentSessionOrNull()
+                                ?.accessToken
+                                ?.trim()
+                                ?.takeIf { it.isNotEmpty() }
+
+                            if (accessToken != null) {
+                                continue
+                            }
+                        }
+
+                        if (!response.isSuccessful) {
+                            Log.w("EdgeSwarm", "USD earnings sync failed: HTTP ${response.code} - $body")
+                            return@withContext 0.0
+                        }
+
+                        val json = JSONObject(body)
+                        val totalEarnedUsd = json.optDouble("totalEarnedUsd", Double.NaN)
+
+                        if (!totalEarnedUsd.isNaN()) {
+                            Log.d("EdgeSwarm", "Provider USD earnings synced: $totalEarnedUsd")
+                            return@withContext totalEarnedUsd
+                        }
+
+                        val summaryTotal = json.optJSONObject("usdSummary")
+                            ?.optDouble("totalEarnedUsd", Double.NaN)
+                            ?: Double.NaN
+
+                        if (!summaryTotal.isNaN()) {
+                            Log.d("EdgeSwarm", "Provider USD summary synced: $summaryTotal")
+                            return@withContext summaryTotal
+                        }
+
+                        Log.w("EdgeSwarm", "USD earnings response missing totalEarnedUsd.")
+                        return@withContext 0.0
+                    }
+                }
+
+                0.0
+            } catch (error: Exception) {
+                Log.w("EdgeSwarm", "USD earnings sync failed.", error)
+                0.0
             }
         }
 
@@ -580,7 +592,7 @@ fun LoginPortalScreen(onAuthSuccess: (String) -> Unit) {
                 } else if (isMfaRequired) {
                     "VERIFY SECURE TOKEN"
                 } else {
-                    "SIGN IN TO SWARM"
+                    "SIGN IN TO EDGESWARM"
                 },
                 fontWeight = FontWeight.Bold
             )
@@ -670,7 +682,7 @@ fun LedgeScreen(userEmail: String) {
         Spacer(modifier = Modifier.height(24.dp))
 
         Text(
-            "RECENT SWARM ACTIVITY",
+            "RECENT REWARD ACTIVITY",
             fontSize = 12.sp,
             fontWeight = FontWeight.Bold,
             color = Color.Gray
@@ -844,15 +856,15 @@ private suspend fun fetchLedgeEvents(providerEmail: String): List<LedgeItem> =
                         val reward = row.firstDoubleOrNull(
                             "reward",
                             "amount",
-                            "score",
-                            "tokenAmount",
-                            "token_amount",
-                            "swm",
-                            "swarm"
+                            "providerUsdReward",
+                            "provider_usd_reward",
+                            "rewardUsd",
+                            "reward_usd",
+                            "score"
                         )
 
                         val scoreText = if (reward != null) {
-                            "${String.format(Locale.US, "%.2f", reward)} SWM"
+                            "$${String.format(Locale.US, "%.4f", reward)} USD"
                         } else {
                             row.optFirstString("score", "rewardText", "reward_text").ifBlank { "PENDING" }
                         }
@@ -888,8 +900,7 @@ private suspend fun fetchLedgeEvents(providerEmail: String): List<LedgeItem> =
 
 @Composable
 fun TokenDashboard(
-    balance: String,
-    usd: String,
+    earningsUsd: String,
     isSyncing: Boolean,
     onSync: () -> Unit
 ) {
@@ -901,14 +912,14 @@ fun TokenDashboard(
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text(
-            "SWARM SYSTEM BALANCE",
+            "PROVIDER EARNINGS",
             color = Color.Gray,
             fontSize = 12.sp,
             fontWeight = FontWeight.Bold
         )
 
         Text(
-            text = if (isSyncing) "SYNCING..." else "$balance SWM",
+            text = if (isSyncing) "SYNCING..." else "\$$earningsUsd USD",
             fontSize = 48.sp,
             fontWeight = FontWeight.Black,
             color = Color.White,
@@ -916,7 +927,7 @@ fun TokenDashboard(
         )
 
         Text(
-            text = "Approx. $usd USD",
+            text = "Verified provider earnings",
             color = Color(0xFF00FFCC),
             fontSize = 18.sp
         )

@@ -933,6 +933,9 @@ class SentinelService : Service() {
                 .put("packageName", packageName)
                 .put("versionCode", BuildConfig.VERSION_CODE)
                 .put("releaseChannel", EdgeSwarmConfig.releaseChannel)
+                .put("packageType", EdgeSwarmConfig.packageType)
+                .put("unifiedProtocolVersion", EdgeSwarmConfig.unifiedProtocolVersion)
+                .put("publicReleaseSafe", EdgeSwarmConfig.publicReleaseSafe)
                 .put("architecture", Build.SUPPORTED_ABIS.firstOrNull() ?: "unknown")
                 .put("osVersion", Build.VERSION.RELEASE ?: "unknown")
                 .put("sdkInt", Build.VERSION.SDK_INT)
@@ -2624,6 +2627,9 @@ class SentinelService : Service() {
                     "releaseChannel",
                     EdgeSwarmConfig.releaseChannel
                 )
+                .put("packageType", EdgeSwarmConfig.packageType)
+                .put("unifiedProtocolVersion", EdgeSwarmConfig.unifiedProtocolVersion)
+                .put("publicReleaseSafe", EdgeSwarmConfig.publicReleaseSafe)
                 .put("packageSha256", packageSha256)
                 .put(
                     "signingCertificateSha256",

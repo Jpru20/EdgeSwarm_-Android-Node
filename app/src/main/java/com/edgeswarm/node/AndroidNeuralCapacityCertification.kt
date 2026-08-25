@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Build
 import android.os.PowerManager
 import android.os.SystemClock
+import android.util.Log
 import java.io.File
 import kotlin.math.max
 import kotlinx.coroutines.CancellationException
@@ -612,7 +613,9 @@ class AndroidNeuralCapacityCertificationCoordinator(
                 id = "support-triage-billing-01",
                 prompt =
                     "Return only valid JSON with keys category, priority, summary, " +
-                        "next_action. A customer says they were charged twice for the " +
+                        "next_action. Use category exactly one of billing, technical, " +
+                        "account, or other. Use priority exactly one of low, medium, or " +
+                        "high. A customer says they were charged twice for the " +
                         "same subscription renewal. Their accounting close is tomorrow " +
                         "and they need the duplicate charge investigated before finance " +
                         "finishes the close.",
@@ -633,7 +636,9 @@ class AndroidNeuralCapacityCertificationCoordinator(
                 id = "support-triage-technical-02",
                 prompt =
                     "Return only valid JSON with keys category, priority, summary, " +
-                        "next_action. A customer's CRM integration stopped syncing new " +
+                        "next_action. Use category exactly one of billing, technical, " +
+                        "account, or other. Use priority exactly one of low, medium, or " +
+                        "high. A customer's CRM integration stopped syncing new " +
                         "records this morning and their sales operations workflow is " +
                         "blocked. Other parts of the account are working normally.",
                 requiredKeys =
