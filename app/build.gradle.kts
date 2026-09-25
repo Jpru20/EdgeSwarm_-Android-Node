@@ -1,5 +1,6 @@
 plugins {
     id("com.android.application")
+    id("com.google.gms.google-services")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
     id("org.jetbrains.kotlin.plugin.serialization") version "2.3.0"
@@ -32,9 +33,15 @@ android {
         applicationId = "com.edgeswarm.node"
         minSdk = 26
         targetSdk = 35
-        versionCode = 167
-        versionName = "1.5.17"
+        versionCode = 168
+        versionName = "1.6.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // ANDROID_RELEASE_ARM64_ONLY_V1
+        // Production Level 2 runtime is certified on arm64 Android.
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
 
         buildConfigField(
             "long",
@@ -141,6 +148,10 @@ configurations.all {
 }
 
 dependencies {
+    // SWARM_ANDROID_FCM_CLIENT_V1
+    implementation(platform("com.google.firebase:firebase-bom:34.19.0"))
+    implementation("com.google.firebase:firebase-messaging")
+
     implementation("com.google.android.gms:play-services-tasks:18.2.0")
     implementation("com.google.android.play:integrity:1.4.0")
 

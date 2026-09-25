@@ -18,7 +18,7 @@
         android:fullBackupContent="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:icon="@mipmap/ic_launcher"
-        android:label="Edge Swarm"
+        android:label="Swarm"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.EdgeSwarm"
@@ -42,7 +42,16 @@
 
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="User-activated distributed compute node that remains visibly active, polls for eligible EdgeSwarm work, and performs local deterministic or neural inference while enabled." />
+                android:value="User-activated distributed AI provider that sleeps while idle, wakes on high-priority FCM work signals, and performs bounded local deterministic or neural inference only while handling eligible work." />
+        </service>
+
+        <!-- SWARM_ANDROID_FCM_SERVICE_V1 -->
+        <service
+            android:name=".SwarmFirebaseMessagingService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
         </service>
 
         <provider

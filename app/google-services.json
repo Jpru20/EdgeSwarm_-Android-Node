@@ -8,6 +8,25 @@
   "client": [
     {
       "client_info": {
+        "mobilesdk_app_id": "1:797795178478:android:5cf91dc7c84854bb94e0ff",
+        "android_client_info": {
+          "package_name": "com.edgeswarm.node"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBVoBMoypzgmRG2yuYh0m1QJSzW4GIMZ8c"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
         "mobilesdk_app_id": "1:797795178478:android:10fac8b9432c53d094e0ff",
         "android_client_info": {
           "package_name": "com.xgpicks.edgeswarm"

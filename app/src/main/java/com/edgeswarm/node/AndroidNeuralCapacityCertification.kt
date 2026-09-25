@@ -132,41 +132,12 @@ class AndroidNeuralCapacityCertificationCoordinator(
                         "baseline_thermal_constraint"
                     }
 
-                    val concurrencyTwo =
-                        runCatching {
-                            runConcurrencyTwo(
-                                modelFile = modelFile,
-                                backend = backend,
-                                workloads = workloads
-                            )
-                        }.getOrNull()
-
-                    val c2Accepted =
-                        concurrencyTwo?.let { sample ->
-                            val latencyLimit =
-                                max(
-                                    baseline.medianTaskMs * 1.80,
-                                    baseline.medianTaskMs + 750.0
-                                )
-
-                            val throughputPass =
-                                baseline.aggregateTokensPerSecond <= 0.0 ||
-                                    sample.aggregateTokensPerSecond >=
-                                    baseline.aggregateTokensPerSecond * 0.90
-
-                            sample.qualityPassRate >= 1.0 &&
-                                !sample.thermalConstrained &&
-                                sample.medianTaskMs.toDouble() <=
-                                    latencyLimit &&
-                                throughputPass
-                        } ?: false
-
-                    val certified =
-                        if (c2Accepted) {
-                            requireNotNull(concurrencyTwo)
-                        } else {
-                            baseline
-                        }
+                    // ANDROID_LEVEL2_SINGLE_LANE_CERT_V1
+                    // Android production execution is single-lane. Avoid
+                    // initializing two LiteRT engines during certification.
+                    val concurrencyTwo: AndroidCertificationSample? = null
+                    val c2Accepted = false
+                    val certified = baseline
 
                     val result =
                         AndroidNeuralCapacityCertificationResult(
@@ -467,6 +438,304 @@ class AndroidNeuralCapacityCertificationCoordinator(
         }.getOrDefault(false)
     }
 
+    // ANDROID_LEVEL2_CERTIFICATE_RESTORE_V1
+    fun restorePersistedCertificate():
+        AndroidNeuralCapacityCertificationResult? {
+
+        val directory =
+            File(
+                appContext.filesDir,
+                "capacity_certificates"
+            )
+
+        if (!directory.isDirectory) {
+            return null
+        }
+
+        val candidates =
+            directory
+                .listFiles()
+                ?.filter {
+                    it.isFile &&
+                        it.name.startsWith(
+                            "android-neural-"
+                        ) &&
+                        it.name.endsWith(
+                            ".json",
+                            ignoreCase = true
+                        )
+                }
+                ?.sortedByDescending {
+                    it.lastModified()
+                }
+                .orEmpty()
+
+        for (certificateFile in candidates) {
+            val restored =
+                runCatching {
+                    restoreCertificateFile(
+                        certificateFile
+                    )
+                }.getOrNull()
+
+            if (restored != null) {
+                return restored
+            }
+        }
+
+        return null
+    }
+
+    private fun restoreCertificateFile(
+        certificateFile: File
+    ): AndroidNeuralCapacityCertificationResult? {
+
+        val payload =
+            JSONObject(
+                certificateFile.readText(
+                    Charsets.UTF_8
+                )
+            )
+
+        if (
+            payload.optString(
+                "certificateVersion"
+            ) !=
+            "edgeswarm-android-neural-capacity-v1"
+        ) {
+            return null
+        }
+
+        if (
+            payload.optString(
+                "certificationPackId"
+            ) !=
+            "edgeswarm-neural-realworld-v1"
+        ) {
+            return null
+        }
+
+        if (
+            payload.optString("runtime") !=
+            "litert-lm"
+        ) {
+            return null
+        }
+
+        val modelId =
+            payload
+                .optString("modelId")
+                .trim()
+
+        val modelSha256 =
+            payload
+                .optString("modelSha256")
+                .trim()
+                .lowercase()
+
+        val capability =
+            payload
+                .optString("modelCapability")
+                .trim()
+
+        if (
+            modelId.isBlank() ||
+            !modelSha256.matches(
+                Regex("^[a-f0-9]{64}$")
+            ) ||
+            !capability.startsWith(
+                "Neural-Inference-",
+                ignoreCase = true
+            )
+        ) {
+            return null
+        }
+
+        val backend =
+            when (
+                payload
+                    .optString("runtimeBackend")
+                    .trim()
+                    .lowercase()
+            ) {
+                "npu" ->
+                    AndroidLevel2Backend.NPU
+
+                "gpu" ->
+                    AndroidLevel2Backend.GPU
+
+                "cpu" ->
+                    AndroidLevel2Backend.CPU
+
+                else ->
+                    return null
+            }
+
+        if (
+            payload.optInt(
+                "certifiedConcurrency",
+                0
+            ) < 1
+        ) {
+            return null
+        }
+
+        val qualityPassRate =
+            payload.optDouble(
+                "qualityPassRate",
+                Double.NaN
+            )
+
+        if (
+            !qualityPassRate.isFinite() ||
+            qualityPassRate < 1.0
+        ) {
+            return null
+        }
+
+        val modelFile =
+            resolveCertifiedModelFile(
+                persistedPath =
+                    payload
+                        .optString(
+                            "modelFilePath"
+                        )
+                        .trim(),
+                modelSha256 =
+                    modelSha256
+            )
+                ?: return null
+
+        return AndroidNeuralCapacityCertificationResult(
+            modelId = modelId,
+            modelSha256 = modelSha256,
+            capability = capability,
+            backend = backend,
+            modelFilePath =
+                modelFile.absolutePath,
+
+            // Current Android scheduler is intentionally
+            // single-lane even if an older certificate
+            // previously tested concurrency two.
+            certifiedConcurrency = 1,
+
+            baselineMedianTaskMs =
+                payload.optLong(
+                    "baselineMedianTaskMs",
+                    0L
+                ),
+
+            baselineAggregateTokensPerSecond =
+                payload.optDouble(
+                    "baselineAggregateTokensPerSecond",
+                    0.0
+                ),
+
+            certifiedMedianTaskMs =
+                payload.optLong(
+                    "certifiedMedianTaskMs",
+                    0L
+                ),
+
+            certifiedAggregateTokensPerSecond =
+                payload.optDouble(
+                    "certifiedAggregateTokensPerSecond",
+                    0.0
+                ),
+
+            qualityPassRate =
+                qualityPassRate,
+
+            certificateFilePath =
+                certificateFile.absolutePath
+        )
+    }
+
+    private fun resolveCertifiedModelFile(
+        persistedPath: String,
+        modelSha256: String
+    ): File? {
+
+        if (persistedPath.isNotBlank()) {
+            val persisted =
+                File(persistedPath)
+
+            if (
+                certifiedModelFileMatches(
+                    persisted,
+                    modelSha256
+                )
+            ) {
+                return persisted
+            }
+        }
+
+        val modelDirectory =
+            File(
+                appContext.filesDir,
+                "level2_models"
+            )
+
+        if (!modelDirectory.isDirectory) {
+            return null
+        }
+
+        return modelDirectory
+            .listFiles()
+            ?.firstOrNull { file ->
+                file.isFile &&
+                    !file.name.endsWith(
+                        ".sha256",
+                        ignoreCase = true
+                    ) &&
+                    !file.name.endsWith(
+                        ".partial",
+                        ignoreCase = true
+                    ) &&
+                    certifiedModelFileMatches(
+                        file,
+                        modelSha256
+                    )
+            }
+    }
+
+    private fun certifiedModelFileMatches(
+        modelFile: File,
+        modelSha256: String
+    ): Boolean {
+
+        if (
+            !modelFile.isFile ||
+            modelFile.length() <= 0L
+        ) {
+            return false
+        }
+
+        val parent =
+            modelFile.parentFile
+                ?: return false
+
+        val checksumFile =
+            File(
+                parent,
+                "${modelFile.name}.sha256"
+            )
+
+        if (!checksumFile.isFile) {
+            return false
+        }
+
+        return runCatching {
+            checksumFile
+                .readText(Charsets.UTF_8)
+                .trim()
+                .equals(
+                    modelSha256,
+                    ignoreCase = true
+                )
+        }.getOrDefault(false)
+    }
+
     private fun persistCertificate(
         result: AndroidNeuralCapacityCertificationResult,
         concurrencyTwo: AndroidCertificationSample?,
@@ -513,6 +782,10 @@ class AndroidNeuralCapacityCertificationCoordinator(
                 .put(
                     "modelCapability",
                     result.capability
+                )
+                .put(
+                    "modelFilePath",
+                    result.modelFilePath
                 )
                 .put(
                     "runtime",

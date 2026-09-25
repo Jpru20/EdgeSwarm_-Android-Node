@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.app.ActivityManager
 import android.annotation.SuppressLint
 import android.content.Intent
 import android.content.IntentFilter
@@ -39,6 +40,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -71,6 +74,13 @@ class SentinelService : Service() {
         const val ACTION_STOP_NODE =
             "com.edgeswarm.node.action.STOP_NODE"
 
+        // SWARM_ANDROID_FCM_WAKE_BRIDGE_V1
+        const val ACTION_FCM_WAKE =
+            "com.edgeswarm.node.action.FCM_WAKE"
+
+        const val EXTRA_FCM_TASK_ID =
+            "com.edgeswarm.node.extra.FCM_TASK_ID"
+
         private const val NOTIFICATION_CHANNEL_ID =
             "sentinel_node"
         private const val NOTIFICATION_ID = 1001
@@ -88,7 +98,13 @@ class SentinelService : Service() {
         val runningState: StateFlow<Boolean> =
             mutableRunningState.asStateFlow()
 
-        // ANDROID_LEVEL2_UI_STATE_FLOW_V1
+
+        private val mutableAvailabilityModeState =
+            MutableStateFlow("stopped")
+
+        val availabilityModeState: StateFlow<String> =
+            mutableAvailabilityModeState.asStateFlow()
+// ANDROID_LEVEL2_UI_STATE_FLOW_V1
         private val mutableLevel2StatusState =
             MutableStateFlow<String?>(null)
 
@@ -106,7 +122,18 @@ class SentinelService : Service() {
             }
     }
 
-    private var wakeLock: PowerManager.WakeLock? = null
+    // ANDROID_BOUNDED_WAKE_LOCK_V2
+    private var wakeToClaimWakeLock:
+        PowerManager.WakeLock? = null
+
+    private var taskExecutionWakeLock:
+        PowerManager.WakeLock? = null
+
+    private val wakeToClaimTimeoutMs =
+        120_000L
+
+    private val taskExecutionWakeTimeoutMs =
+        5L * 60L * 1000L
     private val serviceScope =
         CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -137,6 +164,35 @@ class SentinelService : Service() {
     private var allowScrapingTasks = true
     private var allowBatteryTasks = true
     private var allowNeuralTasks = false
+
+    // ANDROID_HYBRID_AVAILABILITY_V1
+    //
+    // charging_active:
+    //   continuous normal long-poll participation.
+    //
+    // fcm_burst:
+    //   unplugged but recently FCM-woken; temporarily participate.
+    //
+    // fcm_sleep:
+    //   unplugged and idle; no heartbeat/job network polling.
+    private val fcmBurstWindowMsV1 =
+        60_000L
+
+    private val fcmSleepPowerRecheckMsV1 =
+        5_000L
+
+    @Volatile
+    private var fcmBurstUntilElapsedMsV1 =
+        0L
+
+    @Volatile
+    private var lastAvailabilityModeV1 =
+        "starting"
+
+    private val availabilityWakeSignalV1 =
+        Channel<Unit>(
+            Channel.CONFLATED
+        )
     private var level2Runtime: AndroidLevel2Runtime? = null
 
     @Volatile
@@ -164,10 +220,48 @@ class SentinelService : Service() {
     @Volatile
     private var lastThermalConstrained = false
 
+    // ANDROID_NEURAL_RESOURCE_GOVERNOR_V2
+    private val neuralThermalPauseTempC =
+        39.0f
+
+    private val neuralThermalResumeTempC =
+        36.5f
+
+    private val neuralThermalPauseHeadroom =
+        0.70f
+
+    private val neuralThermalResumeHeadroom =
+        0.50f
+
+    private val neuralThermalCooldownMs =
+        90_000L
+
+    private val neuralMinAvailableMemoryBytes =
+        768L * 1024L * 1024L
+
+    @Volatile
+    private var neuralThermalPaused =
+        false
+
+    @Volatile
+    private var neuralThermalPausedAtMs =
+        0L
+
     private var lastHeartbeatAtMs = 0L
     private val heartbeatIntervalMs = 15_000L
     private var nodeWalletAddress: String? = null
     private var heartbeatIdentityLogged = false
+
+    // ANDROID_FCM_BUSY_WAKE_GUARD_V1
+    // Every start command receives an Android startId. A newer FCM
+    // startId prevents the current task from putting the service to
+    // sleep before that newer wake signal receives a fresh get-jobs poll.
+    private val serviceLifecycleLock =
+        Any()
+
+    @Volatile
+    private var latestStartId =
+        0
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(60, TimeUnit.SECONDS)
@@ -191,6 +285,34 @@ class SentinelService : Service() {
             .apply()
     }
 
+    // ANDROID_HYBRID_IDLE_COMPATIBILITY_V1
+    //
+    // Legacy callers still ask whether the Android provider should
+    // destroy SentinelService after task completion / empty polls.
+    //
+    // Under hybrid availability the answer is always NO.
+    //
+    // The engine-loop availability state is authoritative:
+    // charging_active -> normal long-poll participation
+    // fcm_burst       -> temporary battery long-poll participation
+    // fcm_sleep       -> service remains alive locally, but performs
+    //                    no heartbeat or /swarm/get-jobs network work.
+    private fun tryEnterFcmIdleSleep(
+        handledStartId: Int
+    ): Pair<Boolean, Int> {
+        return synchronized(
+            serviceLifecycleLock
+        ) {
+            Pair(
+                false,
+                maxOf(
+                    latestStartId,
+                    handledStartId
+                )
+            )
+        }
+    }
+
     private fun createNodeNotificationChannel() {
         val notificationManager =
             getSystemService(
@@ -199,7 +321,7 @@ class SentinelService : Service() {
 
         val channel = NotificationChannel(
             NOTIFICATION_CHANNEL_ID,
-            "EdgeSwarm Node",
+            "Swarm Provider",
             NotificationManager.IMPORTANCE_LOW
         ).apply {
             description =
@@ -247,7 +369,7 @@ class SentinelService : Service() {
             this,
             NOTIFICATION_CHANNEL_ID
         )
-            .setContentTitle("EdgeSwarm Node")
+            .setContentTitle("Swarm Provider")
             .setContentText(statusText)
             .setSmallIcon(
                 android.R.drawable.ic_dialog_info
@@ -304,6 +426,32 @@ class SentinelService : Service() {
         )
     }
 
+    private fun currentThermalHeadroom():
+        Float? {
+        if (
+            Build.VERSION.SDK_INT <
+            Build.VERSION_CODES.R
+        ) {
+            return null
+        }
+
+        val powerManager =
+            getSystemService(
+                POWER_SERVICE
+            ) as PowerManager
+
+        return runCatching {
+            powerManager
+                .getThermalHeadroom(
+                    10
+                )
+        }.getOrNull()
+            ?.takeIf {
+                it.isFinite() &&
+                    it >= 0f
+            }
+    }
+
     private fun isThermallyConstrained(): Boolean {
         if (
             Build.VERSION.SDK_INT <
@@ -317,29 +465,254 @@ class SentinelService : Service() {
                 POWER_SERVICE
             ) as PowerManager
 
-        return powerManager.currentThermalStatus >=
-            PowerManager.THERMAL_STATUS_MODERATE
+        val thermalStatus =
+            powerManager
+                .currentThermalStatus
+
+        val batteryTempC =
+            getBatteryTempCForHeartbeat()
+
+        val headroom =
+            currentThermalHeadroom()
+
+        val now =
+            SystemClock.elapsedRealtime()
+
+        val shouldPause =
+            thermalStatus >=
+                PowerManager
+                    .THERMAL_STATUS_LIGHT ||
+                (
+                    batteryTempC != null &&
+                    batteryTempC >=
+                        neuralThermalPauseTempC
+                ) ||
+                (
+                    headroom != null &&
+                    headroom >=
+                        neuralThermalPauseHeadroom
+                )
+
+        if (shouldPause) {
+            if (!neuralThermalPaused) {
+                neuralThermalPaused =
+                    true
+
+                neuralThermalPausedAtMs =
+                    now
+
+                Log.i(
+                    "EdgeSwarm",
+                    "ANDROID_NEURAL_RESOURCE_GOVERNOR_V2 " +
+                        "thermalPaused=true " +
+                        "thermalStatus=$thermalStatus " +
+                        "batteryTempC=${batteryTempC ?: "unknown"} " +
+                        "headroom=${headroom ?: "unknown"}"
+                )
+            }
+
+            return true
+        }
+
+        if (!neuralThermalPaused) {
+            return false
+        }
+
+        val cooldownElapsed =
+            now -
+                neuralThermalPausedAtMs >=
+                neuralThermalCooldownMs
+
+        val tempRecovered =
+            batteryTempC == null ||
+                batteryTempC <=
+                    neuralThermalResumeTempC
+
+        val headroomRecovered =
+            headroom == null ||
+                headroom <=
+                    neuralThermalResumeHeadroom
+
+        val statusRecovered =
+            thermalStatus <
+                PowerManager
+                    .THERMAL_STATUS_LIGHT
+
+        if (
+            cooldownElapsed &&
+            tempRecovered &&
+            headroomRecovered &&
+            statusRecovered
+        ) {
+            neuralThermalPaused =
+                false
+
+            Log.i(
+                "EdgeSwarm",
+                "ANDROID_NEURAL_RESOURCE_GOVERNOR_V2 " +
+                    "thermalPaused=false " +
+                    "batteryTempC=${batteryTempC ?: "unknown"} " +
+                    "headroom=${headroom ?: "unknown"}"
+            )
+        }
+
+        return neuralThermalPaused
+    }
+
+    private fun neuralMemoryConstraintReason():
+        String? {
+        val activityManager =
+            getSystemService(
+                ACTIVITY_SERVICE
+            ) as ActivityManager
+
+        val memoryInfo =
+            ActivityManager.MemoryInfo()
+
+        activityManager
+            .getMemoryInfo(
+                memoryInfo
+            )
+
+        val requiredAvailableBytes =
+            maxOf(
+                neuralMinAvailableMemoryBytes,
+                memoryInfo.threshold * 2L
+            )
+
+        return when {
+            memoryInfo.lowMemory ->
+                "system_low_memory"
+
+            memoryInfo.availMem <
+                requiredAvailableBytes ->
+                "available_memory_below_safe_floor"
+
+            else ->
+                null
+        }
+    }
+
+    private fun neuralResourceConstraintReason():
+        String? {
+        if (isThermallyConstrained()) {
+            return "thermal_pressure"
+        }
+
+        return neuralMemoryConstraintReason()
+    }
+
+    private fun extendFcmBurstWindowV1(
+        reason: String
+    ) {
+        val now =
+            SystemClock.elapsedRealtime()
+
+        fcmBurstUntilElapsedMsV1 =
+            maxOf(
+                fcmBurstUntilElapsedMsV1,
+                now + fcmBurstWindowMsV1
+            )
+
+        availabilityWakeSignalV1
+            .trySend(Unit)
+
+        Log.i(
+            "EdgeSwarm",
+            "ANDROID_HYBRID_AVAILABILITY_V1 " +
+                "burst_extended reason=$reason " +
+                "untilElapsedMs=$fcmBurstUntilElapsedMsV1"
+        )
+    }
+
+    private fun isFcmBurstActiveV1(): Boolean {
+        return (
+            SystemClock.elapsedRealtime() <
+                fcmBurstUntilElapsedMsV1
+        )
+    }
+
+    private fun availabilityModeV1(
+        isCharging: Boolean
+    ): String {
+        return when {
+            isCharging ->
+                "charging_active"
+
+            isFcmBurstActiveV1() ->
+                "fcm_burst"
+
+            else ->
+                "fcm_sleep"
+        }
+    }
+
+    private fun publishAvailabilityModeV1(
+        mode: String
+    ) {
+        if (
+            mode ==
+            lastAvailabilityModeV1
+        ) {
+            return
+        }
+
+        val previous =
+            lastAvailabilityModeV1
+
+        lastAvailabilityModeV1 =
+            mode
+
+        mutableAvailabilityModeState.value =
+            mode
+
+        Log.i(
+            "EdgeSwarm",
+            "ANDROID_HYBRID_AVAILABILITY_V1 " +
+                "mode=$mode previous=$previous"
+        )
+
+        updateNodeNotification(
+            currentIdleNotificationText()
+        )
     }
 
     private fun currentPollIntervalMs(): Long {
-        val powerManager =
-            getSystemService(
-                POWER_SERVICE
-            ) as PowerManager
+        val isCharging =
+            getBatteryInfoForHeartbeat()
+                .first == true
 
-        return if (powerManager.isInteractive) {
-            interactivePollIntervalMs
-        } else {
-            idlePollIntervalMs
+        return when (
+            availabilityModeV1(
+                isCharging
+            )
+        ) {
+            // ANDROID_HYBRID_ACTIVE_LONG_POLL_V1
+            //
+            // /swarm/get-jobs itself long-polls.
+            // Reconnect quickly after each response so charging Android
+            // behaves like the Windows/macOS persistent candidate pool.
+            "charging_active",
+            "fcm_burst" ->
+                250L
+
+            else ->
+                fcmSleepPowerRecheckMsV1
         }
     }
 
     private fun currentIdleNotificationText(): String {
         return when {
+            lastAvailabilityModeV1 == "fcm_sleep" ->
+                "Activated - sleeping / FCM ready"
+
+            lastAvailabilityModeV1 == "fcm_burst" ->
+                "Activated - FCM burst availability"
+
             allowNeuralTasks &&
                 level2CertificationPassed &&
-                isThermallyConstrained() ->
-                "Level 2 paused while the device cools"
+                neuralResourceConstraintReason() != null ->
+                "Level 2 paused to protect device resources"
 
             isLevel2Ready() ->
                 "Level 2 - Gemma 4 E2B - " +
@@ -366,6 +739,32 @@ class SentinelService : Service() {
         flags: Int,
         startId: Int
     ): Int {
+        val isFcmWake =
+            intent?.action == ACTION_FCM_WAKE
+
+        val fcmWakeTaskId =
+            intent
+                ?.getStringExtra(
+                    EXTRA_FCM_TASK_ID
+                )
+                ?.trim()
+                ?.takeIf(String::isNotEmpty)
+
+        if (isFcmWake) {
+            extendFcmBurstWindowV1(
+                "fcm_task_available"
+            )
+        }
+
+        if (isFcmWake) {
+            Log.i(
+                "EdgeSwarm",
+                "ANDROID_FCM_WAKE_BRIDGE_V1 received " +
+                    "taskId=${fcmWakeTaskId ?: "none"} " +
+                    "serviceRunning=$isServiceRunning"
+            )
+        }
+
         if (intent?.action == ACTION_STOP_NODE) {
             Log.d(
                 "EdgeSwarm",
@@ -377,8 +776,35 @@ class SentinelService : Service() {
             return START_NOT_STICKY
         }
 
-        if (isServiceRunning) {
-            return START_STICKY
+        val serviceAlreadyRunning =
+            synchronized(
+                serviceLifecycleLock
+            ) {
+                latestStartId =
+                    maxOf(
+                        latestStartId,
+                        startId
+                    )
+
+                isServiceRunning
+            }
+
+        if (serviceAlreadyRunning) {
+            if (isFcmWake) {
+                acquireWakeToClaimWakeLock(
+                    "fcm_running"
+                )
+
+                Log.i(
+                    "EdgeSwarm",
+                    "ANDROID_FCM_BUSY_WAKE_GUARD_V1 " +
+                        "startId=$startId " +
+                        "taskId=${fcmWakeTaskId ?: "none"} " +
+                        "pendingPoll=true"
+                )
+            }
+
+            return START_NOT_STICKY
         }
 
         createNodeNotificationChannel()
@@ -438,6 +864,42 @@ class SentinelService : Service() {
                 ?.trim()
                 .orEmpty()
 
+        // SWARM_ANDROID_FCM_AUTH_STORAGE_RESTORE_V2
+        //
+        // Android background lifecycle handling may leave Auth waiting for
+        // foreground initialization. FCM wake therefore restores the saved
+        // provider session directly from persistent Auth storage.
+        if (isFcmWake) {
+            val authStorageRestore =
+                runCatching {
+                    runBlocking {
+                        kotlinx.coroutines.withTimeout(
+                            5_000L
+                        ) {
+                            supabase.auth.loadFromStorage(
+                                autoRefresh = false
+                            )
+                        }
+                    }
+                }
+
+            if (authStorageRestore.isSuccess) {
+                Log.i(
+                    "EdgeSwarm",
+                    "ANDROID_FCM_AUTH_STORAGE_RESTORE_V2 " +
+                        "loadCompleted=true " +
+                        "sessionFound=${authStorageRestore.getOrNull() == true}"
+                )
+            } else {
+                Log.w(
+                    "EdgeSwarm",
+                    "ANDROID_FCM_AUTH_STORAGE_RESTORE_V2 " +
+                        "loadCompleted=false " +
+                        "reason=${authStorageRestore.exceptionOrNull()?.message}"
+                )
+            }
+        }
+
         val restoredSessionToken =
             runCatching {
                 supabase.auth
@@ -459,11 +921,34 @@ class SentinelService : Service() {
         ) {
             Log.e(
                 "EdgeSwarm",
-                "Node activation rejected: authenticated provider session is missing."
+                "Node activation rejected: authenticated provider session is missing. " +
+                    "source=${if (isFcmWake) "fcm_wake" else "direct"} " +
+                    "emailPresent=${userEmail.isNotBlank()} " +
+                    "tokenPresent=${resolvedAccessToken.isNotBlank()}"
             )
-            setNodeEnabledPreference(false)
+
+            if (isFcmWake) {
+                // Preserve the user's explicit node-enabled intent.
+                // A later FCM wake may succeed once auth restoration is ready.
+                Log.w(
+                    "EdgeSwarm",
+                    "ANDROID_FCM_AUTH_RESTORE_V1 " +
+                        "node_enabled preserved after transient wake failure."
+                )
+            } else {
+                setNodeEnabledPreference(false)
+            }
+
             stopSelf()
             return START_NOT_STICKY
+        }
+
+        if (isFcmWake) {
+            Log.i(
+                "EdgeSwarm",
+                "ANDROID_FCM_AUTH_RESTORE_V1 session=ready " +
+                    "emailPresent=true tokenPresent=true"
+            )
         }
 
         initialAccessToken =
@@ -539,27 +1024,39 @@ class SentinelService : Service() {
 
         setNodeEnabledPreference(true)
 
-        if (allowNeuralTasks && level2Runtime == null) {
-            level2Runtime = AndroidLevel2Runtime(
-                cacheDir = filesDir.resolve("level2_litert_lm_cache")
-            )
-            Log.i(
-                "EdgeSwarm",
-                "Level 2 enabled; waiting for a verified model installation."
-            )
+        // ANDROID_LEVEL2_COLD_READY_RESTORE_V1
+        // Keep idle/service startup lightweight. LiteRT is created
+        // only for first-time certification or an actual neural task.
+
+        synchronized(
+            serviceLifecycleLock
+        ) {
+            latestStartId =
+                maxOf(
+                    latestStartId,
+                    startId
+                )
+
+            isServiceRunning =
+                true
         }
 
-        isServiceRunning = true
-        acquireExecutionWakeLock()
+        acquireWakeToClaimWakeLock(
+            if (isFcmWake) {
+                "fcm_cold_start"
+            } else {
+                "service_start"
+            }
+        )
 
         updateNodeNotification(
             currentIdleNotificationText()
         )
 
         startNeuralCertificationIfEnabled()
-        startHeadlessEngine(userEmail)
+        startHeadlessEngine(userEmail, startId)
 
-        return START_STICKY
+        return START_NOT_STICKY
     }
 
     override fun onDestroy() {
@@ -569,6 +1066,10 @@ class SentinelService : Service() {
             "Node deactivation requested. Stopping service."
         )
         isServiceRunning = false
+        mutableAvailabilityModeState.value =
+            "stopped"
+        lastAvailabilityModeV1 =
+            "stopped"
         serviceScope.cancel()
         initialAccessToken = null
         runCatching {
@@ -585,7 +1086,8 @@ class SentinelService : Service() {
         level2ActiveBackendType = null
         level2LastError = null
         publishLevel2Status(null)
-        releaseExecutionWakeLock()
+        releaseWakeToClaimWakeLock()
+        releaseTaskExecutionWakeLock()
     }
 
     override fun onTimeout(startId: Int, fgsType: Int) {
@@ -598,27 +1100,110 @@ class SentinelService : Service() {
         stopSelf(startId)
     }
 
-    private fun acquireExecutionWakeLock() {
-        releaseExecutionWakeLock()
+    private fun acquireWakeToClaimWakeLock(
+        reason: String
+    ) {
+        releaseWakeToClaimWakeLock()
 
         val powerManager =
-            getSystemService(POWER_SERVICE) as PowerManager
+            getSystemService(
+                POWER_SERVICE
+            ) as PowerManager
 
-        wakeLock = powerManager.newWakeLock(
-            PowerManager.PARTIAL_WAKE_LOCK,
-            "EdgeSwarm::NodeWakeLock"
-        ).apply {
-            acquire()
+        wakeToClaimWakeLock =
+            powerManager.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK,
+                "EdgeSwarm::WakeToClaim"
+            ).apply {
+                setReferenceCounted(false)
+                acquire(wakeToClaimTimeoutMs)
+            }
+
+        Log.i(
+            "EdgeSwarm",
+            "ANDROID_BOUNDED_WAKE_LOCK_V2 " +
+                "acquire phase=wake_to_claim " +
+                "reason=$reason " +
+                "timeoutMs=$wakeToClaimTimeoutMs"
+        )
+    }
+
+    private fun releaseWakeToClaimWakeLock() {
+        var released = false
+
+        wakeToClaimWakeLock?.let { lock ->
+            if (lock.isHeld) {
+                runCatching {
+                    lock.release()
+                }.onSuccess {
+                    released = true
+                }
+            }
+        }
+
+        wakeToClaimWakeLock = null
+
+        if (released) {
+            Log.i(
+                "EdgeSwarm",
+                "ANDROID_BOUNDED_WAKE_LOCK_V2 " +
+                    "release phase=wake_to_claim"
+            )
         }
     }
 
-    private fun releaseExecutionWakeLock() {
-        wakeLock?.let { lock ->
+    private fun acquireTaskExecutionWakeLock(
+        taskId: Int
+    ) {
+        releaseTaskExecutionWakeLock()
+
+        val powerManager =
+            getSystemService(
+                POWER_SERVICE
+            ) as PowerManager
+
+        taskExecutionWakeLock =
+            powerManager.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK,
+                "EdgeSwarm::TaskExecution"
+            ).apply {
+                setReferenceCounted(false)
+                acquire(
+                    taskExecutionWakeTimeoutMs
+                )
+            }
+
+        Log.i(
+            "EdgeSwarm",
+            "ANDROID_BOUNDED_WAKE_LOCK_V2 " +
+                "acquire phase=task_execution " +
+                "taskId=$taskId " +
+                "timeoutMs=$taskExecutionWakeTimeoutMs"
+        )
+    }
+
+    private fun releaseTaskExecutionWakeLock() {
+        var released = false
+
+        taskExecutionWakeLock?.let { lock ->
             if (lock.isHeld) {
-                runCatching { lock.release() }
+                runCatching {
+                    lock.release()
+                }.onSuccess {
+                    released = true
+                }
             }
         }
-        wakeLock = null
+
+        taskExecutionWakeLock = null
+
+        if (released) {
+            Log.i(
+                "EdgeSwarm",
+                "ANDROID_BOUNDED_WAKE_LOCK_V2 " +
+                    "release phase=task_execution"
+            )
+        }
     }
 
     private fun getBatteryInfoForHeartbeat(): Pair<Boolean?, Int?> {
@@ -1057,6 +1642,45 @@ class SentinelService : Service() {
                 )
             }
 
+            // SWARM_ANDROID_FCM_HEARTBEAT_V1
+            //
+            // Add the cached FCM registration only after heartbeat
+            // identity logging so the token is never written to Logcat.
+            val cachedFcmToken =
+                SwarmFcmState.cachedToken(this)
+
+            val cachedFcmTokenUpdatedAtMs =
+                SwarmFcmState.cachedTokenUpdatedAt(this)
+
+            if (!cachedFcmToken.isNullOrBlank()) {
+                val fcmMetadata =
+                    JSONObject()
+                        .put(
+                            "fcmToken",
+                            cachedFcmToken
+                        )
+                        .put(
+                            "fcmWakeChannel",
+                            "fcm_http_v1"
+                        )
+
+                if (cachedFcmTokenUpdatedAtMs != null) {
+                    fcmMetadata.put(
+                        "fcmTokenUpdatedAt",
+                        java.time.Instant
+                            .ofEpochMilli(
+                                cachedFcmTokenUpdatedAtMs
+                            )
+                            .toString()
+                    )
+                }
+
+                payload.put(
+                    "metadata",
+                    fcmMetadata
+                )
+            }
+
             val body = payload
                 .toString()
                 .toRequestBody("application/json".toMediaType())
@@ -1113,6 +1737,32 @@ class SentinelService : Service() {
         currentTaskIds: List<Int> = emptyList(),
         force: Boolean = false
     ) {
+        // ANDROID_HYBRID_HEARTBEAT_SLEEP_GUARD_V1
+        //
+        // No call site may advertise the provider while it is in
+        // battery-idle FCM sleep. This also covers forced heartbeat
+        // paths such as thermal-state changes.
+        val heartbeatAvailabilityMode =
+            availabilityModeV1(
+                getBatteryInfoForHeartbeat()
+                    .first == true
+            )
+
+        if (
+            heartbeatAvailabilityMode ==
+                "fcm_sleep"
+        ) {
+            Log.d(
+                "EdgeSwarm",
+                "ANDROID_HYBRID_HEARTBEAT_SLEEP_GUARD_V1 " +
+                    "suppressed=true " +
+                    "mode=fcm_sleep " +
+                    "force=$force"
+            )
+
+            return
+        }
+
         val now = System.currentTimeMillis()
 
         if (!force && now - lastHeartbeatAtMs < heartbeatIntervalMs) {
@@ -1124,8 +1774,16 @@ class SentinelService : Service() {
         performNodeAttestationPhase1(hardwareId, providerEmail)
     }
 
-    private fun startHeadlessEngine(userEmail: String) {
+    private fun startHeadlessEngine(
+        userEmail: String,
+        startId: Int
+    ) {
         serviceScope.launch {
+            var handledStartId =
+                startId
+
+            var emptyPollCount =
+                0
             runCatching {
                 android.os.Process.setThreadPriority(
                     android.os.Process
@@ -1193,19 +1851,47 @@ class SentinelService : Service() {
                         )
                     }
 
+                    val batteryInfo =
+                        getBatteryInfoForHeartbeat()
+
+                    val isCharging =
+                        batteryInfo.first == true
+
+                    val availabilityMode =
+                        availabilityModeV1(
+                            isCharging
+                        )
+
+                    publishAvailabilityModeV1(
+                        availabilityMode
+                    )
+
+                    if (
+                        availabilityMode ==
+                            "fcm_sleep"
+                    ) {
+                        // FCM_SLEEP:
+                        // no heartbeat and no /swarm/get-jobs network
+                        // polling while the phone is unplugged and idle.
+                        //
+                        // FCM wakes this immediately. The timeout only
+                        // rechecks whether external power was connected.
+                        releaseWakeToClaimWakeLock()
+
+                        withTimeoutOrNull(
+                            fcmSleepPowerRecheckMsV1
+                        ) {
+                            availabilityWakeSignalV1
+                                .receive()
+                        }
+
+                        continue
+                    }
+
                     maybeSendNodeHeartbeat(
                         hardwareId,
                         userEmail
                     )
-
-                    val batteryInfo = getBatteryInfoForHeartbeat()
-                    val isCharging = batteryInfo.first == true
-
-                    if (!allowBatteryTasks && !isCharging) {
-                        Log.d("EdgeSwarm", "Waiting for charging state because battery task mode is disabled.")
-                        delay(currentPollIntervalMs())
-                        continue
-                    }
 
                     val task = fetchTaskFromMempool(
                         hardwareId,
@@ -1213,10 +1899,34 @@ class SentinelService : Service() {
                     )
 
                     if (!isServiceRunning) {
+                        releaseWakeToClaimWakeLock()
                         break
                     }
 
+                    task
+                        ?.optInt("taskId", -1)
+                        ?.takeIf { it >= 0 }
+                        ?.let(
+                            ::acquireTaskExecutionWakeLock
+                        )
+
                     if (task != null) {
+                        if (!isCharging) {
+                            extendFcmBurstWindowV1(
+                                "task_received"
+                            )
+                        }
+                        handledStartId =
+                            synchronized(
+                                serviceLifecycleLock
+                            ) {
+                                latestStartId
+                            }
+
+                        emptyPollCount =
+                            0
+
+                        releaseWakeToClaimWakeLock()
                         val taskId = task.getInt("taskId")
                         val prompt = task.getString("prompt")
                         // ANDROID_CAPABILITY_BASED_TASK_ROUTING_V1
@@ -1421,6 +2131,16 @@ class SentinelService : Service() {
                                         "Exact extraction plan is not supported."
                                     )
                             } else if (isNeuralTask) {
+                                val resourceBlockReason =
+                                    neuralResourceConstraintReason()
+
+                                check(
+                                    resourceBlockReason == null
+                                ) {
+                                    "Android neural execution paused: " +
+                                        resourceBlockReason
+                                }
+
                                 val requestedCapabilities =
                                     routeValues.filter {
                                         it.startsWith(
@@ -1470,6 +2190,21 @@ class SentinelService : Service() {
                                         runCatching {
                                             readyRuntime.close()
                                         }
+
+                                        if (
+                                            level2Runtime ===
+                                            readyRuntime
+                                        ) {
+                                            level2Runtime =
+                                                null
+                                        }
+
+                                        Log.i(
+                                            "EdgeSwarm",
+                                            "ANDROID_NEURAL_RUNTIME_RELEASE_V1 " +
+                                                "taskId=$taskId " +
+                                                "runtimeLoaded=false"
+                                        )
 
                                         updateNodeNotification(
                                             currentIdleNotificationText()
@@ -1570,7 +2305,8 @@ class SentinelService : Service() {
                                 "cpu"
                             }
 
-                        uploadViaStream(
+                        val uploadSucceeded =
+                            uploadViaStream(
                             taskId = taskId,
                             workerEmail = userEmail,
                             latency = latencyMs,
@@ -1592,20 +2328,153 @@ class SentinelService : Service() {
                             force = true
                         )
 
+                        releaseTaskExecutionWakeLock()
+
+                        // ANDROID_FCM_FIRST_POST_TASK_SLEEP_V1
+                        // Sleep only after a confirmed result upload.
+                        // stopSelfResult(startId) refuses to stop when a
+                        // newer FCM start command arrived while this task
+                        // was running.
+                        if (uploadSucceeded) {
+                            val sleepDecision =
+                                tryEnterFcmIdleSleep(
+                                    handledStartId
+                                )
+
+                            if (sleepDecision.first) {
+                                Log.i(
+                                    "EdgeSwarm",
+                                    "ANDROID_FCM_FIRST_POST_TASK_SLEEP_V1 " +
+                                        "taskId=$taskId " +
+                                        "uploadConfirmed=true " +
+                                        "nodeEnabledPreserved=true"
+                                )
+
+                                break
+                            }
+
+                            handledStartId =
+                                sleepDecision.second
+
+                            Log.i(
+                                "EdgeSwarm",
+                                "ANDROID_FCM_BUSY_WAKE_GUARD_V1 " +
+                                    "taskId=$taskId " +
+                                    "newerStartId=$handledStartId " +
+                                    "sleepDeferred=true " +
+                                    "immediatePoll=true"
+                            )
+
+                            continue
+                        }
+
+                        Log.w(
+                            "EdgeSwarm",
+                            "ANDROID_FCM_FIRST_POST_TASK_SLEEP_V1 " +
+                                "taskId=$taskId " +
+                                "uploadConfirmed=false " +
+                                "continuePolling=true"
+                        )
+
                         updateNodeNotification(
-                            currentIdleNotificationText()
+                            "Result upload failed - provider remains awake for recovery"
                         )
 
                     }
+
+                    if (task == null) {
+                        emptyPollCount +=
+                            1
+
+                        val neuralSetupPending =
+                            allowNeuralTasks &&
+                                !level2CertificationPassed &&
+                                level2LastError == null
+
+                        if (
+                            emptyPollCount >= 2 &&
+                            !neuralSetupPending
+                        ) {
+                            releaseWakeToClaimWakeLock()
+
+                            val idleSleepDecision =
+                                tryEnterFcmIdleSleep(
+                                    handledStartId
+                                )
+
+                            if (
+                                idleSleepDecision.first
+                            ) {
+                                Log.i(
+                                    "EdgeSwarm",
+                                    "ANDROID_FCM_FIRST_IDLE_SLEEP_V1 " +
+                                        "emptyPolls=$emptyPollCount " +
+                                        "nodeEnabledPreserved=true"
+                                )
+
+                                break
+                            }
+
+                            handledStartId =
+                                idleSleepDecision.second
+
+                            emptyPollCount =
+                                0
+
+                            Log.i(
+                                "EdgeSwarm",
+                                "ANDROID_FCM_BUSY_WAKE_GUARD_V1 " +
+                                    "newerStartId=$handledStartId " +
+                                    "idleSleepDeferred=true " +
+                                    "immediatePoll=true"
+                            )
+
+                            continue
+                        }
+                    }
+
                     delay(currentPollIntervalMs())
                 }
             } catch (e: CancellationException) {
-                Log.d("EdgeSwarm", "Engine loop stopped normally.")
+                Log.d(
+                    "EdgeSwarm",
+                    "Engine loop stopped normally."
+                )
             } catch (e: Exception) {
-                Log.e("EdgeSwarm", "Engine Loop Crash: ${e.message}", e)
-            } finally {
-                releaseExecutionWakeLock()
+                Log.e(
+                    "EdgeSwarm",
+                    "Engine Loop Crash: ${e.message}",
+                    e
+                )
+
+                synchronized(
+                    serviceLifecycleLock
+                ) {
+                    isServiceRunning =
+                        false
+                }
+
                 stopSelf()
+            } finally {
+                synchronized(
+                    serviceLifecycleLock
+                ) {
+                    if (
+                        latestStartId <=
+                        handledStartId
+                    ) {
+                        releaseWakeToClaimWakeLock()
+                        releaseTaskExecutionWakeLock()
+                    } else {
+                        Log.i(
+                            "EdgeSwarm",
+                            "ANDROID_FCM_BUSY_WAKE_GUARD_V1 " +
+                                "finalizerSkippedWakeRelease=true " +
+                                "handledStartId=$handledStartId " +
+                                "latestStartId=$latestStartId"
+                        )
+                    }
+                }
             }
         }
     }
@@ -2819,13 +3688,94 @@ class SentinelService : Service() {
 
     private fun startNeuralCertificationIfEnabled() {
         if (!allowNeuralTasks) {
+            runCatching {
+                level2Runtime?.close()
+            }
+
+            level2Runtime = null
+
             updateNodeNotification(
                 currentIdleNotificationText()
             )
+
             return
         }
 
-        val runtime = level2Runtime ?: return
+        val coordinator =
+            AndroidNeuralCapacityCertificationCoordinator(
+                this
+            )
+
+        // ANDROID_LEVEL2_CERTIFICATE_RESTORE_V1
+        // Restore previously verified capability without
+        // loading the LiteRT engine or neural model.
+        val restored =
+            runCatching {
+                coordinator
+                    .restorePersistedCertificate()
+            }.onFailure { error ->
+                Log.w(
+                    "EdgeSwarm",
+                    "Stored Android neural certificate " +
+                        "could not be restored: " +
+                        (
+                            error.message
+                                ?: error.javaClass.simpleName
+                        )
+                )
+            }.getOrNull()
+
+        if (restored != null) {
+            runCatching {
+                level2Runtime?.close()
+            }
+
+            level2Runtime = null
+
+            level2CertificationPassed = true
+            level2ActiveModelId =
+                restored.modelId
+            level2ActiveCapability =
+                restored.capability
+            level2ActiveBackend =
+                restored.backend.telemetryName
+            level2ActiveModelPath =
+                restored.modelFilePath
+            level2ActiveBackendType =
+                restored.backend
+            androidCertifiedNeuralConcurrency = 1
+            level2LastError = null
+
+            publishLevel2Status(
+                "Neural ready - ${restored.modelId} - " +
+                    "${restored.backend.telemetryName.uppercase()} - " +
+                    "1 slot"
+            )
+
+            updateNodeNotification(
+                currentIdleNotificationText()
+            )
+
+            Log.i(
+                "EdgeSwarm",
+                "ANDROID_LEVEL2_CERT_RESTORE_V1 " +
+                    "restored=true " +
+                    "model=${restored.modelId} " +
+                    "capability=${restored.capability} " +
+                    "backend=${restored.backend.telemetryName} " +
+                    "certifiedConcurrency=1 " +
+                    "runtimeLoaded=false"
+            )
+
+            return
+        }
+
+        Log.i(
+            "EdgeSwarm",
+            "ANDROID_LEVEL2_CERT_RESTORE_V1 " +
+                "restored=false " +
+                "action=single_lane_certification"
+        )
 
         level2CertificationPassed = false
         androidCertifiedNeuralConcurrency = 0
@@ -2834,10 +3784,40 @@ class SentinelService : Service() {
         level2ActiveBackend = null
         level2ActiveModelPath = null
         level2ActiveBackendType = null
+        val certificationResourceBlock =
+            neuralResourceConstraintReason()
+
+        if (
+            certificationResourceBlock !=
+            null
+        ) {
+            level2LastError =
+                "Neural certification waiting for safe device resources: " +
+                    certificationResourceBlock
+
+            publishLevel2Status(
+                "Neural certification paused - " +
+                    certificationResourceBlock
+            )
+
+            updateNodeNotification(
+                "Level 1 ready - neural setup waiting for safe resources"
+            )
+
+            Log.w(
+                "EdgeSwarm",
+                "ANDROID_NEURAL_RESOURCE_GOVERNOR_V2 " +
+                    "certificationBlocked=true " +
+                    "reason=$certificationResourceBlock"
+            )
+
+            return
+        }
+
         level2LastError = null
 
         publishLevel2Status(
-            "Running neural capability and slot certification..."
+            "Running neural capability certification..."
         )
 
         updateNodeNotification(
@@ -2845,19 +3825,37 @@ class SentinelService : Service() {
         )
 
         serviceScope.launch(Dispatchers.IO) {
+            val runtime =
+                AndroidLevel2Runtime(
+                    cacheDir =
+                        filesDir.resolve(
+                            "level2_litert_lm_cache"
+                        )
+                )
+
+            level2Runtime = runtime
+
             try {
                 Log.i(
                     "EdgeSwarm",
-                    "Starting Android neural capacity certification."
+                    "Starting Android neural capacity " +
+                        "certification in single-lane mode."
                 )
 
                 val result =
-                    AndroidNeuralCapacityCertificationCoordinator(
-                        this@SentinelService
-                    ).initializeAndRun(runtime)
+                    coordinator.initializeAndRun(
+                        runtime
+                    )
 
                 if (!isServiceRunning) {
-                    runCatching { runtime.close() }
+                    runCatching {
+                        runtime.close()
+                    }
+
+                    if (level2Runtime === runtime) {
+                        level2Runtime = null
+                    }
+
                     return@launch
                 }
 
@@ -2872,21 +3870,26 @@ class SentinelService : Service() {
                     result.modelFilePath
                 level2ActiveBackendType =
                     result.backend
-                androidCertifiedNeuralConcurrency =
-                    result.certifiedConcurrency
+
+                // Android production remains single-lane.
+                androidCertifiedNeuralConcurrency = 1
                 level2LastError = null
 
-                // MOBILE_COLD_READY_LEVEL2_V1
+                // MOBILE_COLD_READY_LEVEL2_V2
                 // Preserve verified eligibility while releasing
                 // the large LiteRT-LM engine during idle time.
                 runCatching {
                     runtime.close()
                 }
 
+                if (level2Runtime === runtime) {
+                    level2Runtime = null
+                }
+
                 publishLevel2Status(
                     "Neural ready - ${result.modelId} - " +
                         "${result.backend.telemetryName.uppercase()} - " +
-                        "${result.certifiedConcurrency} slot(s)"
+                        "1 slot"
                 )
 
                 updateNodeNotification(
@@ -2899,24 +3902,39 @@ class SentinelService : Service() {
                         "model=${result.modelId}, " +
                         "capability=${result.capability}, " +
                         "backend=${result.backend.telemetryName}, " +
-                        "certifiedConcurrency=${result.certifiedConcurrency}, " +
-                        "baselineMedianMs=${result.baselineMedianTaskMs}, " +
-                        "baselineTps=${result.baselineAggregateTokensPerSecond}, " +
-                        "certifiedMedianMs=${result.certifiedMedianTaskMs}, " +
-                        "certifiedTps=${result.certifiedAggregateTokensPerSecond}, " +
-                        "quality=${result.qualityPassRate}"
+                        "certifiedConcurrency=1, " +
+                        "quality=${result.qualityPassRate}, " +
+                        "runtimeLoaded=false"
                 )
             } catch (error: CancellationException) {
+                runCatching {
+                    runtime.close()
+                }
+
+                if (level2Runtime === runtime) {
+                    level2Runtime = null
+                }
+
                 throw error
             } catch (error: Throwable) {
+                runCatching {
+                    runtime.close()
+                }
+
+                if (level2Runtime === runtime) {
+                    level2Runtime = null
+                }
+
                 level2CertificationPassed = false
+                androidCertifiedNeuralConcurrency = 0
                 level2ActiveModelId = null
                 level2ActiveCapability = null
                 level2ActiveBackend = null
                 level2ActiveModelPath = null
                 level2ActiveBackendType = null
                 level2LastError =
-                    error.message ?: error.javaClass.simpleName
+                    error.message
+                        ?: error.javaClass.simpleName
 
                 publishLevel2Status(
                     "Neural certification failed: " +
@@ -2930,10 +3948,6 @@ class SentinelService : Service() {
                     currentIdleNotificationText()
                 )
 
-                runCatching {
-                    runtime.close()
-                }
-
                 Log.e(
                     "EdgeSwarm",
                     "Android neural certification failed. " +
@@ -2943,7 +3957,6 @@ class SentinelService : Service() {
             }
         }
     }
-
 
     private fun fetchTaskFromMempool(hwId: String, providerEmail: String): JSONObject? {
         val pollStartedAt = SystemClock.elapsedRealtime()
@@ -3019,6 +4032,16 @@ class SentinelService : Service() {
 
     private fun prepareLevel2RuntimeForTask():
         AndroidLevel2Runtime {
+        val resourceBlockReason =
+            neuralResourceConstraintReason()
+
+        check(
+            resourceBlockReason == null
+        ) {
+            "Android Level 2 paused: " +
+                resourceBlockReason
+        }
+
         check(isLevel2Ready()) {
             "Android Level 2 is not currently eligible."
         }
@@ -3077,7 +4100,7 @@ class SentinelService : Service() {
     private fun isLevel2Ready(): Boolean {
         return allowNeuralTasks &&
             level2CertificationPassed &&
-            !isThermallyConstrained() &&
+            neuralResourceConstraintReason() == null &&
             !level2ActiveModelId.isNullOrBlank() &&
             !level2ActiveModelPath.isNullOrBlank() &&
             level2ActiveBackendType != null &&

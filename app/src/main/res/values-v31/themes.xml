@@ -1,1 +1,11 @@
-<?xml version="1.0" encoding="utf-8"?><resources><style name="Theme.EdgeSwarm" parent="android:Theme.Material.Light.NoActionBar"><item name="android:windowSplashScreenBackground">@android:color/black</item><item name="android:windowSplashScreenAnimatedIcon">@drawable/edge_swarm_logo</item><item name="android:windowBackground">@android:color/black</item><item name="android:windowLightStatusBar">false</item><item name="android:navigationBarColor">@android:color/black</item></style></resources>
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.EdgeSwarm" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowSplashScreenBackground">#000827</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>
+        <item name="android:windowBackground">@drawable/swarm_splash</item>
+        <item name="android:statusBarColor">#000827</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:navigationBarColor">#000827</item>
+    </style>
+</resources>

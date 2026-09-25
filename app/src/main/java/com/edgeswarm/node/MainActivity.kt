@@ -1,4 +1,4 @@
-﻿package com.edgeswarm.node
+package com.edgeswarm.node
 
 import android.Manifest
 import android.content.Intent
@@ -110,7 +110,7 @@ class MainActivity : ComponentActivity() {
                 mutableStateOf(sharedPrefs.getString("earnings_usd", "0.00") ?: "0.00")
             }
             var isSyncing by remember { mutableStateOf(false) }
-            var selectedTab by remember { mutableIntStateOf(1) }
+            var selectedTab by remember { mutableIntStateOf(2) }
 
             LaunchedEffect(isLoggedIn, authenticatedUserEmail) {
                 if (isLoggedIn && authenticatedUserEmail.isNotEmpty()) {
@@ -160,37 +160,26 @@ class MainActivity : ComponentActivity() {
                         }
                     )
                 } else {
+                    // SWARM_SYSTEM_STATUS_BAR_INSET_V1
+                    // Keep Swarm below the Android status bar while
+                    // preserving the dark system-bar background.
                     Scaffold(
-                        modifier = Modifier.fillMaxSize(),
-                        bottomBar = {
-                            NavigationBar(containerColor = Color(0xFF161A1E)) {
-                                NavigationBarItem(
-                                    selected = selectedTab == 0,
-                                    onClick = { selectedTab = 0 },
-                                    icon = { Icon(Icons.AutoMirrored.Filled.List, "Ledge", tint = Color.White) },
-                                    label = { Text("Ledge") }
-                                )
-                                NavigationBarItem(
-                                    selected = selectedTab == 1,
-                                    onClick = { selectedTab = 1 },
-                                    icon = { Icon(Icons.Default.AccountBox, "Token", tint = Color.White) },
-                                    label = { Text("Token") }
-                                )
-                                NavigationBarItem(
-                                    selected = selectedTab == 2,
-                                    onClick = { selectedTab = 2 },
-                                    icon = { Icon(Icons.Default.Settings, "Node", tint = Color.White) },
-                                    label = { Text("Node") }
-                                )
-                            }
-                        },
-                        containerColor = Color(0xFF0B0E11)
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .statusBarsPadding(),
+                        bottomBar = {},
+                        containerColor = Color(0xFFF7F7FA),
+                        contentWindowInsets =
+                            WindowInsets.safeDrawing.only(
+                                WindowInsetsSides.Horizontal +
+                                    WindowInsetsSides.Bottom
+                            )
                     ) { innerPadding ->
                         Box(
                             modifier = Modifier
                                 .fillMaxSize()
                                 .padding(innerPadding)
-                                .background(Color(0xFF0B0E11))
+                                .background(Color(0xFFF7F7FA))
                         ) {
                             when (selectedTab) {
                                 0 -> LedgeScreen(authenticatedUserEmail)
@@ -206,6 +195,7 @@ class MainActivity : ComponentActivity() {
                                 }
                                 2 -> SentinelScreen(
                                     userEmail = authenticatedUserEmail,
+                                    earningsUsd = earningsUsd,
                                     onSignOut = {
                                         scope.launch {
                                             context.getSharedPreferences(
@@ -1041,6 +1031,7 @@ private fun compareAppVersions(current: String?, target: String?): Int {
 @Composable
 fun SentinelScreen(
     userEmail: String,
+    earningsUsd: String,
     onSignOut: () -> Unit
 ) {
     val context = LocalContext.current
@@ -1053,6 +1044,49 @@ fun SentinelScreen(
             "EdgeSwarmNodeSettings",
             android.content.Context.MODE_PRIVATE
         )
+    }
+
+    // ANDROID_FCM_FIRST_LOGICAL_ACTIVATION_UI_V1
+    // Logical activation is independent from whether the short-lived
+    // Sentinel foreground service is currently awake.
+    var nodeEnabled by remember {
+        mutableStateOf(
+            nodeSettings.getBoolean(
+                "node_enabled",
+                false
+            )
+        )
+    }
+
+    androidx.compose.runtime.DisposableEffect(
+        nodeSettings
+    ) {
+        val listener =
+            android.content.SharedPreferences
+                .OnSharedPreferenceChangeListener {
+                    preferences,
+                    key ->
+
+                    if (key == "node_enabled") {
+                        nodeEnabled =
+                            preferences.getBoolean(
+                                "node_enabled",
+                                false
+                            )
+                    }
+                }
+
+        nodeSettings
+            .registerOnSharedPreferenceChangeListener(
+                listener
+            )
+
+        onDispose {
+            nodeSettings
+                .unregisterOnSharedPreferenceChangeListener(
+                    listener
+                )
+        }
     }
 
     var allowCompute by rememberSaveable {
@@ -1118,7 +1152,7 @@ fun SentinelScreen(
             },
             text = {
                 Text(
-                    "EdgeSwarm will verify this phone's hardware, then " +
+                    "Swarm will verify this phone's hardware, then " +
                         "download approximately 2.6 GB over HTTPS. " +
                         "The model remains in private app storage."
                 )
@@ -1280,156 +1314,751 @@ fun SentinelScreen(
         }
     }
 
-    val nodeScreenScrollState = rememberScrollState()
+    // SWARM_PROVIDER_UI_V1
+    val nodeScreenScrollState =
+        rememberScrollState()
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(nodeScreenScrollState)
-            .padding(
-                start = 24.dp,
-                end = 24.dp,
-                top = 24.dp,
-                bottom = 48.dp
-            ),
-        verticalArrangement = Arrangement.Top,
-        horizontalAlignment = Alignment.CenterHorizontally
+    var deviceSnapshot by remember {
+        mutableStateOf(
+            readSwarmDeviceSnapshot(
+                context
+            )
+        )
+    }
+
+    var fcmReady by remember {
+        mutableStateOf(
+            !SwarmFcmState
+                .cachedToken(context)
+                .isNullOrBlank()
+        )
+    }
+
+    val fcmPrefs =
+        remember(context) {
+            context.getSharedPreferences(
+                SwarmFcmState.PREFS,
+                android.content.Context.MODE_PRIVATE
+            )
+        }
+
+    var lastTaskId by remember {
+        mutableStateOf(
+            fcmPrefs.getString(
+                SwarmFcmState.KEY_LAST_TASK_ID,
+                null
+            )
+        )
+    }
+
+    var lastWakeAtMs by remember {
+        mutableLongStateOf(
+            fcmPrefs.getLong(
+                SwarmFcmState.KEY_LAST_MESSAGE_AT,
+                0L
+            )
+        )
+    }
+
+    LaunchedEffect(
+        nodeEnabled,
+        isRunning
     ) {
-        Text(
-            "EDGE SWARM NODE",
-            color = Color(0xFF03DAC5),
-            fontSize = 24.sp,
-            fontWeight = FontWeight.Bold
-        )
+        while (true) {
+            deviceSnapshot =
+                readSwarmDeviceSnapshot(
+                    context
+                )
 
-        Text(
-            text = "APP VERSION: v$currentAppVersion",
-            color = Color(0xFF00FFCC),
-            fontSize = 11.sp,
-            modifier = Modifier.padding(top = 4.dp),
-            fontWeight = FontWeight.Bold
-        )
+            fcmReady =
+                !SwarmFcmState
+                    .cachedToken(context)
+                    .isNullOrBlank()
 
-        Text(
-            text = "CONNECTED AS: $userEmail",
-            color = Color.Gray,
-            fontSize = 11.sp,
-            modifier = Modifier.padding(top = 4.dp),
-            textAlign = TextAlign.Center
-        )
+            lastTaskId =
+                fcmPrefs.getString(
+                    SwarmFcmState.KEY_LAST_TASK_ID,
+                    null
+                )
 
-        Text(
-            text = "STATUS: ${if (isRunning) "ACTIVE IN BACKGROUND" else "STANDBY"}",
-            color = Color.Gray,
-            fontSize = 12.sp,
-            modifier = Modifier.padding(top = 4.dp)
-        )
+            lastWakeAtMs =
+                fcmPrefs.getLong(
+                    SwarmFcmState.KEY_LAST_MESSAGE_AT,
+                    0L
+                )
 
-        Spacer(modifier = Modifier.height(12.dp))
+            kotlinx.coroutines.delay(
+                15_000L
+            )
+        }
+    }
 
-        AndroidUpdateStatusCard(
-            currentVersion = currentAppVersion,
-            releaseInfo = androidReleaseInfo,
-            loading = androidReleaseLoading,
-            error = androidReleaseError,
-            onDownload = {
-                val release = androidReleaseInfo
-                val url = release?.downloadUrl
-                val uri = url?.let(android.net.Uri::parse)
-                val packageMatches = release?.packageName.isNullOrBlank() ||
-                    release?.packageName == com.edgeswarm.node.BuildConfig.APPLICATION_ID
+    val swarmPurple =
+        Color(0xFF6754E8)
 
-                when {
-                    !packageMatches -> Toast.makeText(
+    val swarmBackground =
+        Color(0xFFF7F7FA)
+
+    val swarmText =
+        Color(0xFF202027)
+
+    val swarmMuted =
+        Color(0xFF6F6F7A)
+
+    val nodeStatus =
+        when {
+            !nodeEnabled ->
+                "Inactive"
+
+            isRunning ->
+                "Activated - Awake"
+
+            else ->
+                "Activated - Sleeping"
+        }
+
+    val nodeDescription =
+        when {
+            !nodeEnabled ->
+                "Activate this phone to make its verified capacity available to Swarm."
+
+            isRunning ->
+                "The provider is awake and checking or handling eligible work."
+
+            else ->
+                "Ready for work. Swarm wakes this phone automatically when an eligible task arrives."
+        }
+
+    val neuralSummary =
+        when {
+            serviceLevel2StatusText != null ->
+                serviceLevel2StatusText.orEmpty()
+
+            allowNeuralTasks ->
+                "Neural enabled - certification restores on wake and the model loads only for neural work."
+
+            else ->
+                "Optional neural capacity is disabled."
+        }
+
+    val certifiedCapacity =
+        if (allowNeuralTasks) {
+            "Level 1 + Neural"
+        } else {
+            "Level 1"
+        }
+
+    val activitySummary =
+        when {
+            isRunning ->
+                "Provider awake"
+
+            nodeEnabled && fcmReady ->
+                "Sleeping - FCM ready"
+
+            nodeEnabled ->
+                "Activated - FCM token pending"
+
+            else ->
+                "Provider inactive"
+        }
+
+    val toggleProvider: () -> Unit = {
+        val serviceIntent =
+            Intent(
+                context,
+                SentinelService::class.java
+            )
+
+        if (!nodeEnabled) {
+            val accessToken =
+                supabase.auth
+                    .currentSessionOrNull()
+                    ?.accessToken
+
+            val walletReady =
+                WalletVault.hasPrivateKey(
+                    context,
+                    userEmail
+                )
+
+            when {
+                accessToken.isNullOrBlank() ->
+                    Toast.makeText(
                         context,
-                        "Update metadata does not match this Android package.",
+                        "Your session has expired. Sign in again before activating the provider.",
                         Toast.LENGTH_LONG
                     ).show()
 
-                    uri?.scheme != "https" -> Toast.makeText(
+                !walletReady ->
+                    Toast.makeText(
                         context,
-                        "The update URL is not a secure HTTPS address.",
+                        "The provider wallet is not ready yet. Reopen Swarm and let wallet sync finish.",
                         Toast.LENGTH_LONG
                     ).show()
 
-                    else -> context.startActivity(
-                        android.content.Intent(android.content.Intent.ACTION_VIEW, uri)
+                updateRequired ->
+                    Toast.makeText(
+                        context,
+                        "Install the required Android update before activating the provider.",
+                        Toast.LENGTH_LONG
+                    ).show()
+
+                else -> {
+                    serviceIntent.putExtra(
+                        "USER_EMAIL",
+                        userEmail
                     )
+
+                    serviceIntent.putExtra(
+                        "ACCESS_TOKEN",
+                        accessToken
+                    )
+
+                    serviceIntent.putExtra(
+                        "ALLOW_COMPUTE",
+                        allowCompute
+                    )
+
+                    serviceIntent.putExtra(
+                        "ALLOW_SCRAPING",
+                        allowScraping
+                    )
+
+                    serviceIntent.putExtra(
+                        "ALLOW_BATTERY_TASKS",
+                        allowBatteryTasks
+                    )
+
+                    serviceIntent.putExtra(
+                        "ALLOW_NEURAL",
+                        allowNeuralTasks
+                    )
+
+                    nodeSettings.edit()
+                        .putBoolean(
+                            "node_enabled",
+                            true
+                        )
+                        .apply()
+
+                    nodeEnabled = true
+
+                    runCatching {
+                        ContextCompat
+                            .startForegroundService(
+                                context,
+                                serviceIntent
+                            )
+                    }.onFailure { error ->
+                        nodeSettings.edit()
+                            .putBoolean(
+                                "node_enabled",
+                                false
+                            )
+                            .apply()
+
+                        nodeEnabled = false
+
+                        Toast.makeText(
+                            context,
+                            "Provider activation failed: ${error.message}",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
                 }
             }
-        )
+        } else {
+            nodeSettings.edit()
+                .putBoolean(
+                    "node_enabled",
+                    false
+                )
+                .apply()
 
-        Spacer(modifier = Modifier.height(24.dp))
+            nodeEnabled = false
 
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF161A1E)),
-            shape = RoundedCornerShape(12.dp)
+            context.stopService(
+                serviceIntent
+            )
+        }
+    }
+
+    Surface(
+        modifier =
+            Modifier.fillMaxSize(),
+        color =
+            swarmBackground
+    ) {
+        Column(
+            modifier =
+                Modifier
+                    .fillMaxSize()
+                    .verticalScroll(
+                        nodeScreenScrollState
+                    )
+                    .padding(
+                        horizontal = 20.dp,
+                        vertical = 12.dp
+                    ),
+            verticalArrangement =
+                Arrangement.spacedBy(
+                    16.dp
+                )
         ) {
-            Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                modifier =
+                    Modifier.fillMaxWidth(),
+                horizontalArrangement =
+                    Arrangement.SpaceBetween,
+                verticalAlignment =
+                    Alignment.CenterVertically
+            ) {
+                Column {
+                    Text(
+                        text = "Swarm",
+                        color = swarmText,
+                        fontSize = 26.sp,
+                        fontWeight =
+                            FontWeight.ExtraBold
+                    )
+
+                    Text(
+                        text =
+                            "Distributed AI Provider",
+                        color =
+                            swarmMuted,
+                        fontSize = 13.sp
+                    )
+                }
+
                 Text(
-                    "WORKLOAD ROUTING",
+                    text =
+                        "v$currentAppVersion",
+                    color =
+                        swarmMuted,
                     fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.Gray
+                    fontWeight =
+                        FontWeight.SemiBold
                 )
+            }
 
-                Spacer(modifier = Modifier.height(16.dp))
+            Card(
+                modifier =
+                    Modifier.fillMaxWidth(),
+                shape =
+                    RoundedCornerShape(
+                        22.dp
+                    ),
+                colors =
+                    CardDefaults.cardColors(
+                        containerColor =
+                            Color.White
+                    )
+            ) {
+                Column(
+                    modifier =
+                        Modifier.padding(
+                            20.dp
+                        ),
+                    verticalArrangement =
+                        Arrangement.spacedBy(
+                            14.dp
+                        )
+                ) {
+                    Row(
+                        modifier =
+                            Modifier
+                                .fillMaxWidth(),
+                        horizontalArrangement =
+                            Arrangement.SpaceBetween,
+                        verticalAlignment =
+                            Alignment.CenterVertically
+                    ) {
+                        Column(
+                            modifier =
+                                Modifier.weight(
+                                    1f
+                                )
+                        ) {
+                            Text(
+                                text =
+                                    "Provider Node",
+                                color =
+                                    swarmText,
+                                fontSize =
+                                    20.sp,
+                                fontWeight =
+                                    FontWeight.Bold
+                            )
 
-                RoutingSwitchRow(
-                    title = "Distributed Compute",
-                    subtitle = "Process deterministic matrix and compute tasks.",
-                    checked = allowCompute,
-                    enabled = !isRunning,
-                    onCheckedChange = {
-                        allowCompute = it
-                        nodeSettings.edit()
-                            .putBoolean("allow_compute", it)
-                            .apply()
+                            Spacer(
+                                modifier =
+                                    Modifier.height(
+                                        3.dp
+                                    )
+                            )
+
+                            Text(
+                                text =
+                                    nodeDescription,
+                                color =
+                                    swarmMuted,
+                                fontSize =
+                                    13.sp
+                            )
+                        }
+
+                        Spacer(
+                            modifier =
+                                Modifier.width(
+                                    12.dp
+                                )
+                        )
+
+                        SwarmStatusPill(
+                            text =
+                                nodeStatus,
+                            enabled =
+                                nodeEnabled,
+                            awake =
+                                isRunning
+                        )
                     }
-                )
 
-                Spacer(modifier = Modifier.height(12.dp))
-
-                RoutingSwitchRow(
-                    title = "Data Scraper",
-                    subtitle = "Handle structured web and data extraction tasks.",
-                    checked = allowScraping,
-                    enabled = !isRunning,
-                    onCheckedChange = {
-                        allowScraping = it
-                        nodeSettings.edit()
-                            .putBoolean("allow_scraping", it)
-                            .apply()
+                    Button(
+                        onClick =
+                            toggleProvider,
+                        modifier =
+                            Modifier
+                                .fillMaxWidth()
+                                .height(
+                                    54.dp
+                                ),
+                        shape =
+                            RoundedCornerShape(
+                                16.dp
+                            ),
+                        colors =
+                            ButtonDefaults
+                                .buttonColors(
+                                    containerColor =
+                                        swarmPurple
+                                )
+                    ) {
+                        Text(
+                            text =
+                                if (nodeEnabled) {
+                                    "Deactivate Provider"
+                                } else {
+                                    "Activate Provider"
+                                },
+                            fontWeight =
+                                FontWeight.Bold,
+                            color =
+                                Color.White
+                        )
                     }
+
+                    if (
+                        nodeEnabled &&
+                        !isRunning
+                    ) {
+                        Text(
+                            text =
+                                "No continuous polling or Swarm wake lock while sleeping.",
+                            color =
+                                swarmMuted,
+                            fontSize =
+                                11.sp,
+                            textAlign =
+                                TextAlign.Center,
+                            modifier =
+                                Modifier.fillMaxWidth()
+                        )
+                    }
+                }
+            }
+
+            Row(
+                modifier =
+                    Modifier.fillMaxWidth(),
+                horizontalArrangement =
+                    Arrangement.spacedBy(
+                        12.dp
+                    )
+            ) {
+                SwarmMetricCard(
+                    modifier =
+                        Modifier.weight(
+                            1f
+                        ),
+                    title =
+                        "Earnings",
+                    value =
+                        "USD $earningsUsd",
+                    detail =
+                        "Provider rewards"
                 )
 
-                Spacer(modifier = Modifier.height(12.dp))
+                SwarmMetricCard(
+                    modifier =
+                        Modifier.weight(
+                            1f
+                        ),
+                    title =
+                        "Certified Capacity",
+                    value =
+                        certifiedCapacity,
+                    detail =
+                        if (allowNeuralTasks) {
+                            "Deterministic + neural"
+                        } else {
+                            "Deterministic"
+                        }
+                )
+            }
 
-                RoutingSwitchRow(
-                    title = "Exact Extraction",
-                    subtitle = "Run deterministic extraction and validation jobs.",
-                    checked = true,
-                    enabled = false,
+            SwarmSectionCard(
+                title =
+                    "Device Performance",
+                subtitle =
+                    "Current phone conditions"
+            ) {
+                SwarmInfoRow(
+                    label =
+                        "Runtime",
+                    value =
+                        if (isRunning) {
+                            "Awake"
+                        } else if (nodeEnabled) {
+                            "Sleeping"
+                        } else {
+                            "Inactive"
+                        }
+                )
+
+                SwarmInfoRow(
+                    label =
+                        "Battery",
+                    value =
+                        deviceSnapshot
+                            .batteryPercent
+                            ?.let {
+                                "$it%"
+                            }
+                            ?: "Unknown"
+                )
+
+                SwarmInfoRow(
+                    label =
+                        "Power",
+                    value =
+                        when (
+                            deviceSnapshot
+                                .charging
+                        ) {
+                            true ->
+                                "Charging"
+
+                            false ->
+                                "Battery"
+
+                            null ->
+                                "Unknown"
+                        }
+                )
+
+                SwarmInfoRow(
+                    label =
+                        "Temperature",
+                    value =
+                        deviceSnapshot
+                            .temperatureC
+                            ?.let {
+                                String.format(
+                                    Locale.US,
+                                    "%.1f C",
+                                    it
+                                )
+                            }
+                            ?: "Unknown"
+                )
+
+                SwarmInfoRow(
+                    label =
+                        "Thermal state",
+                    value =
+                        deviceSnapshot
+                            .thermalLabel
+                )
+
+                SwarmInfoRow(
+                    label =
+                        "Battery tasks",
+                    value =
+                        if (
+                            allowBatteryTasks
+                        ) {
+                            "Allowed"
+                        } else {
+                            "Charging only"
+                        }
+                )
+            }
+
+            SwarmSectionCard(
+                title =
+                    "Activity",
+                subtitle =
+                    activitySummary
+            ) {
+                SwarmInfoRow(
+                    label =
+                        "FCM wake channel",
+                    value =
+                        if (fcmReady) {
+                            "Ready"
+                        } else {
+                            "Pending"
+                        }
+                )
+
+                SwarmInfoRow(
+                    label =
+                        "Last wake",
+                    value =
+                        swarmRelativeTime(
+                            lastWakeAtMs
+                        )
+                )
+
+                SwarmInfoRow(
+                    label =
+                        "Last task signal",
+                    value =
+                        lastTaskId
+                            ?.takeIf {
+                                it.isNotBlank()
+                            }
+                            ?.let {
+                                "Task $it"
+                            }
+                            ?: "None"
+                )
+            }
+
+            SwarmSectionCard(
+                title =
+                    "Workload Routing",
+                subtitle =
+                    if (nodeEnabled) {
+                        "Deactivate the provider to change routing preferences."
+                    } else {
+                        "Choose which work this phone may accept."
+                    }
+            ) {
+                SwarmRoutingSwitchRow(
+                    title =
+                        "Exact Extraction",
+                    subtitle =
+                        "Deterministic extraction and validation.",
+                    checked =
+                        true,
+                    enabled =
+                        false,
                     onCheckedChange = {}
                 )
 
-                Spacer(modifier = Modifier.height(12.dp))
-
-                RoutingSwitchRow(
-                    title = "Level 2 Neural Inference",
+                SwarmRoutingSwitchRow(
+                    title =
+                        "Distributed Compute",
                     subtitle =
-                        serviceLevel2StatusText
-                            ?: level2StatusText,
-                    checked = allowNeuralTasks,
+                        "Deterministic matrix and compute tasks.",
+                    checked =
+                        allowCompute,
                     enabled =
-                        !isRunning &&
+                        !nodeEnabled,
+                    onCheckedChange = {
+                        allowCompute = it
+
+                        nodeSettings.edit()
+                            .putBoolean(
+                                "allow_compute",
+                                it
+                            )
+                            .apply()
+                    }
+                )
+
+                SwarmRoutingSwitchRow(
+                    title =
+                        "Data Scraper",
+                    subtitle =
+                        "Structured web and data extraction tasks.",
+                    checked =
+                        allowScraping,
+                    enabled =
+                        !nodeEnabled,
+                    onCheckedChange = {
+                        allowScraping = it
+
+                        nodeSettings.edit()
+                            .putBoolean(
+                                "allow_scraping",
+                                it
+                            )
+                            .apply()
+                    }
+                )
+
+                SwarmRoutingSwitchRow(
+                    title =
+                        "Accept Tasks While Not Charging",
+                    subtitle =
+                        "Allow deterministic work while this phone is on battery.",
+                    checked =
+                        allowBatteryTasks,
+                    enabled =
+                        !nodeEnabled,
+                    onCheckedChange = {
+                        allowBatteryTasks = it
+
+                        nodeSettings.edit()
+                            .putBoolean(
+                                "allow_battery_tasks",
+                                it
+                            )
+                            .apply()
+                    }
+                )
+            }
+
+            SwarmSectionCard(
+                title =
+                    "Neural Capacity",
+                subtitle =
+                    neuralSummary
+            ) {
+                SwarmRoutingSwitchRow(
+                    title =
+                        "Level 2 Neural Inference",
+                    subtitle =
+                        "Gemma 4 E2B with verified Android acceleration.",
+                    checked =
+                        allowNeuralTasks,
+                    enabled =
+                        !nodeEnabled &&
                             !level2InstallInProgress,
-                    onCheckedChange = { enabled ->
+                    onCheckedChange = {
+                        enabled ->
+
                         if (enabled) {
-                            showLevel2DownloadDialog = true
+                            showLevel2DownloadDialog =
+                                true
                         } else {
-                            allowNeuralTasks = false
+                            allowNeuralTasks =
+                                false
 
                             nodeSettings.edit()
                                 .putBoolean(
@@ -1439,174 +2068,633 @@ fun SentinelScreen(
                                 .apply()
 
                             level2StatusText =
-                                "Level 2 disabled. The installed model " +
-                                    "remains available for later use."
+                                "Level 2 disabled. The installed model remains available for later use."
                         }
                     }
                 )
 
-                Spacer(modifier = Modifier.height(12.dp))
-
-
-                RoutingSwitchRow(
-                    title = "Accept Tasks While Not Charging",
-                    subtitle = "Allow Level 1 deterministic tasks while the phone is on battery.",
-                    checked = allowBatteryTasks,
-                    enabled = !isRunning,
-                    onCheckedChange = {
-                        allowBatteryTasks = it
-                        nodeSettings.edit()
-                            .putBoolean("allow_battery_tasks", it)
-                            .apply()
-                    }
+                Text(
+                    text =
+                        "Neural models stay unloaded while idle and are opened only for eligible neural work.",
+                    color =
+                        swarmMuted,
+                    fontSize =
+                        11.sp
                 )
             }
-        }
 
-        Spacer(modifier = Modifier.height(20.dp))
+            SwarmSectionCard(
+                title =
+                    "Diagnostics & Updates",
+                subtitle =
+                    "Provider identity and release status"
+            ) {
+                SwarmInfoRow(
+                    label =
+                        "Account",
+                    value =
+                        userEmail
+                )
 
-        Text(
-            text =
-                "EdgeSwarm runs as a user-controlled foreground node. " +
-                    "Android may restore it after reclaiming the process " +
-                    "while the node remains activated.",
-            color = Color.Gray,
-            fontSize = 10.sp,
-            textAlign = TextAlign.Center
-        )
+                SwarmInfoRow(
+                    label =
+                        "App version",
+                    value =
+                        "v$currentAppVersion"
+                )
 
-        Spacer(modifier = Modifier.height(20.dp))
+                SwarmInfoRow(
+                    label =
+                        "Update",
+                    value =
+                        when {
+                            androidReleaseLoading ->
+                                "Checking"
 
-        Button(
-            onClick = {
-                val serviceIntent = Intent(context, SentinelService::class.java)
+                            androidReleaseError != null ->
+                                "Check unavailable"
 
-                if (!isRunning) {
-                    val accessToken = supabase.auth.currentSessionOrNull()?.accessToken
-                    val walletReady = WalletVault.hasPrivateKey(context, userEmail)
+                            updateRequired ->
+                                "Required"
 
-                    when {
-                        accessToken.isNullOrBlank() -> Toast.makeText(
-                            context,
-                            "Your session has expired. Sign in again before activating the node.",
-                            Toast.LENGTH_LONG
-                        ).show()
+                            else ->
+                                "Up to date"
+                        }
+                )
 
-                        !walletReady -> Toast.makeText(
-                            context,
-                            "The node wallet is not ready yet. Reopen the app and let wallet sync finish.",
-                            Toast.LENGTH_LONG
-                        ).show()
+                val release =
+                    androidReleaseInfo
 
-                        updateRequired -> Toast.makeText(
-                            context,
-                            "Install the required Android node update before activating.",
-                            Toast.LENGTH_LONG
-                        ).show()
+                if (
+                    !release
+                        ?.downloadUrl
+                        .isNullOrBlank()
+                ) {
+                    TextButton(
+                        onClick = {
+                            val url =
+                                release
+                                    ?.downloadUrl
 
-                        else -> {
-                            serviceIntent.putExtra(
-                                "USER_EMAIL",
-                                userEmail
-                            )
-                            serviceIntent.putExtra(
-                                "ACCESS_TOKEN",
-                                accessToken
-                            )
-                            serviceIntent.putExtra(
-                                "ALLOW_COMPUTE",
-                                allowCompute
-                            )
-                            serviceIntent.putExtra(
-                                "ALLOW_SCRAPING",
-                                allowScraping
-                            )
-                            serviceIntent.putExtra(
-                                "ALLOW_BATTERY_TASKS",
-                                allowBatteryTasks
-                            )
-                            serviceIntent.putExtra(
-                                "ALLOW_NEURAL",
-                                allowNeuralTasks
-                            )
-
-                            nodeSettings.edit()
-                                .putBoolean(
-                                    "node_enabled",
-                                    true
+                            val uri =
+                                url?.let(
+                                    android.net.Uri::parse
                                 )
-                                .apply()
 
-                            runCatching {
-                                ContextCompat.startForegroundService(
-                                    context,
-                                    serviceIntent
-                                )
-                            }.onFailure { error ->
-                                nodeSettings.edit()
-                                    .putBoolean(
-                                        "node_enabled",
-                                        false
+                            val packageMatches =
+                                release
+                                    ?.packageName
+                                    .isNullOrBlank() ||
+                                    release
+                                        ?.packageName ==
+                                    BuildConfig
+                                        .APPLICATION_ID
+
+                            when {
+                                !packageMatches ->
+                                    Toast.makeText(
+                                        context,
+                                        "Update metadata does not match this Android package.",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+
+                                uri?.scheme !=
+                                    "https" ->
+                                    Toast.makeText(
+                                        context,
+                                        "The update URL is not a secure HTTPS address.",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+
+                                else ->
+                                    context.startActivity(
+                                        Intent(
+                                            Intent.ACTION_VIEW,
+                                            uri
+                                        )
                                     )
-                                    .apply()
-                                Toast.makeText(
-                                    context,
-                                    "Node activation failed: ${error.message}",
-                                    Toast.LENGTH_LONG
-                                ).show()
                             }
                         }
-                    }
-                } else {
-                    nodeSettings.edit()
-                        .putBoolean(
-                            "node_enabled",
-                            false
+                    ) {
+                        Text(
+                            text =
+                                "Open update",
+                            color =
+                                swarmPurple,
+                            fontWeight =
+                                FontWeight.SemiBold
                         )
-                        .apply()
-
-                    context.stopService(
-                        serviceIntent
-                    )
+                    }
                 }
-            },
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(80.dp),
-            shape = RoundedCornerShape(16.dp),
-            colors = ButtonDefaults.buttonColors(
-                containerColor = if (isRunning) Color(0xFFE53935) else Color(0xFF1E2329)
-            )
-        ) {
-            Text(
-                text = if (isRunning) {
-                    "DEACTIVATE NODE"
-                } else {
-                    "ACTIVATE NODE"
-                },
-                fontWeight = FontWeight.ExtraBold
-            )
-        }
+            }
 
-        Spacer(modifier = Modifier.height(12.dp))
+            TextButton(
+                onClick =
+                    onSignOut,
+                enabled =
+                    !nodeEnabled,
+                modifier =
+                    Modifier
+                        .align(
+                            Alignment.CenterHorizontally
+                        )
+            ) {
+                Text(
+                    text =
+                        if (nodeEnabled) {
+                            "Deactivate provider before signing out"
+                        } else {
+                            "Sign out"
+                        },
+                    color =
+                        swarmMuted,
+                    fontSize =
+                        12.sp
+                )
+            }
 
-        TextButton(
-            onClick = onSignOut,
-            enabled = !isRunning
-        ) {
-            Text(
-                text = if (isRunning) {
-                    "DEACTIVATE NODE BEFORE SIGNING OUT"
-                } else {
-                    "SIGN OUT"
-                },
-                color = Color.Gray,
-                fontSize = 11.sp
+            Spacer(
+                modifier =
+                    Modifier.height(
+                        28.dp
+                    )
             )
         }
     }
 }
 
+private data class SwarmDeviceSnapshot(
+    val batteryPercent: Int?,
+    val charging: Boolean?,
+    val temperatureC: Float?,
+    val thermalLabel: String
+)
+
+private fun readSwarmDeviceSnapshot(
+    context: android.content.Context
+): SwarmDeviceSnapshot {
+    val batteryIntent =
+        context.registerReceiver(
+            null,
+            android.content.IntentFilter(
+                android.content.Intent
+                    .ACTION_BATTERY_CHANGED
+            )
+        )
+
+    val level =
+        batteryIntent?.getIntExtra(
+            android.os.BatteryManager
+                .EXTRA_LEVEL,
+            -1
+        ) ?: -1
+
+    val scale =
+        batteryIntent?.getIntExtra(
+            android.os.BatteryManager
+                .EXTRA_SCALE,
+            -1
+        ) ?: -1
+
+    val percent =
+        if (
+            level >= 0 &&
+            scale > 0
+        ) {
+            (
+                level.toFloat() /
+                    scale.toFloat() *
+                    100f
+                ).toInt()
+        } else {
+            null
+        }
+
+    val batteryStatus =
+        batteryIntent?.getIntExtra(
+            android.os.BatteryManager
+                .EXTRA_STATUS,
+            -1
+        ) ?: -1
+
+    val charging =
+        if (batteryStatus < 0) {
+            null
+        } else {
+            batteryStatus ==
+                android.os.BatteryManager
+                    .BATTERY_STATUS_CHARGING ||
+                batteryStatus ==
+                android.os.BatteryManager
+                    .BATTERY_STATUS_FULL
+        }
+
+    val tempTenths =
+        batteryIntent?.getIntExtra(
+            android.os.BatteryManager
+                .EXTRA_TEMPERATURE,
+            Int.MIN_VALUE
+        ) ?: Int.MIN_VALUE
+
+    val temperatureC =
+        if (
+            tempTenths ==
+                Int.MIN_VALUE ||
+            tempTenths <= 0
+        ) {
+            null
+        } else {
+            tempTenths / 10f
+        }
+
+    val thermalLabel =
+        if (
+            Build.VERSION.SDK_INT <
+            Build.VERSION_CODES.Q
+        ) {
+            "Unavailable"
+        } else {
+            val powerManager =
+                context.getSystemService(
+                    android.content.Context
+                        .POWER_SERVICE
+                ) as android.os.PowerManager
+
+            when (
+                powerManager
+                    .currentThermalStatus
+            ) {
+                android.os.PowerManager
+                    .THERMAL_STATUS_NONE ->
+                    "Normal"
+
+                android.os.PowerManager
+                    .THERMAL_STATUS_LIGHT ->
+                    "Light"
+
+                android.os.PowerManager
+                    .THERMAL_STATUS_MODERATE ->
+                    "Moderate"
+
+                android.os.PowerManager
+                    .THERMAL_STATUS_SEVERE ->
+                    "Severe"
+
+                android.os.PowerManager
+                    .THERMAL_STATUS_CRITICAL ->
+                    "Critical"
+
+                android.os.PowerManager
+                    .THERMAL_STATUS_EMERGENCY ->
+                    "Emergency"
+
+                android.os.PowerManager
+                    .THERMAL_STATUS_SHUTDOWN ->
+                    "Shutdown"
+
+                else ->
+                    "Unknown"
+            }
+        }
+
+    return SwarmDeviceSnapshot(
+        batteryPercent =
+            percent,
+        charging =
+            charging,
+        temperatureC =
+            temperatureC,
+        thermalLabel =
+            thermalLabel
+    )
+}
+
+private fun swarmRelativeTime(
+    timestampMs: Long
+): String {
+    if (timestampMs <= 0L) {
+        return "None"
+    }
+
+    val ageMs =
+        (
+            System.currentTimeMillis() -
+                timestampMs
+            ).coerceAtLeast(
+                0L
+            )
+
+    return when {
+        ageMs < 60_000L ->
+            "Just now"
+
+        ageMs < 3_600_000L ->
+            "${ageMs / 60_000L} min ago"
+
+        ageMs < 86_400_000L ->
+            "${ageMs / 3_600_000L} hr ago"
+
+        else ->
+            "${ageMs / 86_400_000L} d ago"
+    }
+}
+
+@Composable
+private fun SwarmStatusPill(
+    text: String,
+    enabled: Boolean,
+    awake: Boolean
+) {
+    val background =
+        when {
+            !enabled ->
+                Color(0xFFEDEDF1)
+
+            awake ->
+                Color(0xFFEDE9FF)
+
+            else ->
+                Color(0xFFE6F6EE)
+        }
+
+    val foreground =
+        when {
+            !enabled ->
+                Color(0xFF6F6F7A)
+
+            awake ->
+                Color(0xFF6754E8)
+
+            else ->
+                Color(0xFF197A55)
+        }
+
+    Surface(
+        color =
+            background,
+        shape =
+            RoundedCornerShape(
+                999.dp
+            )
+    ) {
+        Text(
+            text =
+                text,
+            modifier =
+                Modifier.padding(
+                    horizontal =
+                        12.dp,
+                    vertical =
+                        7.dp
+                ),
+            color =
+                foreground,
+            fontSize =
+                11.sp,
+            fontWeight =
+                FontWeight.Bold
+        )
+    }
+}
+
+@Composable
+private fun SwarmMetricCard(
+    modifier: Modifier,
+    title: String,
+    value: String,
+    detail: String
+) {
+    Card(
+        modifier =
+            modifier,
+        shape =
+            RoundedCornerShape(
+                18.dp
+            ),
+        colors =
+            CardDefaults.cardColors(
+                containerColor =
+                    Color.White
+            )
+    ) {
+        Column(
+            modifier =
+                Modifier.padding(
+                    16.dp
+                )
+        ) {
+            Text(
+                text =
+                    title,
+                color =
+                    Color(0xFF6F6F7A),
+                fontSize =
+                    11.sp,
+                fontWeight =
+                    FontWeight.SemiBold
+            )
+
+            Spacer(
+                modifier =
+                    Modifier.height(
+                        7.dp
+                    )
+            )
+
+            Text(
+                text =
+                    value,
+                color =
+                    Color(0xFF202027),
+                fontSize =
+                    18.sp,
+                fontWeight =
+                    FontWeight.Bold
+            )
+
+            Spacer(
+                modifier =
+                    Modifier.height(
+                        3.dp
+                    )
+            )
+
+            Text(
+                text =
+                    detail,
+                color =
+                    Color(0xFF8A8A94),
+                fontSize =
+                    10.sp
+            )
+        }
+    }
+}
+
+@Composable
+private fun SwarmSectionCard(
+    title: String,
+    subtitle: String,
+    content:
+        @Composable
+        ColumnScope.() -> Unit
+) {
+    Card(
+        modifier =
+            Modifier.fillMaxWidth(),
+        shape =
+            RoundedCornerShape(
+                18.dp
+            ),
+        colors =
+            CardDefaults.cardColors(
+                containerColor =
+                    Color.White
+            )
+    ) {
+        Column(
+            modifier =
+                Modifier.padding(
+                    18.dp
+                ),
+            verticalArrangement =
+                Arrangement.spacedBy(
+                    12.dp
+                )
+        ) {
+            Text(
+                text =
+                    title,
+                color =
+                    Color(0xFF202027),
+                fontSize =
+                    16.sp,
+                fontWeight =
+                    FontWeight.Bold
+            )
+
+            Text(
+                text =
+                    subtitle,
+                color =
+                    Color(0xFF777781),
+                fontSize =
+                    11.sp
+            )
+
+            HorizontalDivider(
+                color =
+                    Color(0xFFEDEDF1)
+            )
+
+            content()
+        }
+    }
+}
+
+@Composable
+private fun SwarmInfoRow(
+    label: String,
+    value: String
+) {
+    Row(
+        modifier =
+            Modifier.fillMaxWidth(),
+        horizontalArrangement =
+            Arrangement.SpaceBetween,
+        verticalAlignment =
+            Alignment.CenterVertically
+    ) {
+        Text(
+            text =
+                label,
+            color =
+                Color(0xFF777781),
+            fontSize =
+                12.sp
+        )
+
+        Spacer(
+            modifier =
+                Modifier.width(
+                    16.dp
+                )
+        )
+
+        Text(
+            text =
+                value,
+            color =
+                Color(0xFF202027),
+            fontSize =
+                12.sp,
+            fontWeight =
+                FontWeight.SemiBold,
+            textAlign =
+                TextAlign.End
+        )
+    }
+}
+
+@Composable
+private fun SwarmRoutingSwitchRow(
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    enabled: Boolean,
+    onCheckedChange:
+        (Boolean) -> Unit
+) {
+    Row(
+        modifier =
+            Modifier.fillMaxWidth(),
+        horizontalArrangement =
+            Arrangement.SpaceBetween,
+        verticalAlignment =
+            Alignment.CenterVertically
+    ) {
+        Column(
+            modifier =
+                Modifier
+                    .weight(
+                        1f
+                    )
+                    .padding(
+                        end =
+                            12.dp
+                    )
+        ) {
+            Text(
+                text =
+                    title,
+                color =
+                    Color(0xFF202027),
+                fontSize =
+                    13.sp,
+                fontWeight =
+                    FontWeight.SemiBold
+            )
+
+            Text(
+                text =
+                    subtitle,
+                color =
+                    Color(0xFF777781),
+                fontSize =
+                    10.sp
+            )
+        }
+
+        Switch(
+            checked =
+                checked,
+            onCheckedChange =
+                onCheckedChange,
+            enabled =
+                enabled
+        )
+    }
+}
 @Composable
 private fun RoutingSwitchRow(
     title: String,
