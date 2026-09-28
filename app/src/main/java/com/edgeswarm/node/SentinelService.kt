@@ -74,6 +74,10 @@ class SentinelService : Service() {
         const val ACTION_STOP_NODE =
             "com.edgeswarm.node.action.STOP_NODE"
 
+        // ANDROID_PACKAGE_REPLACE_RESUME_V1
+        const val ACTION_PACKAGE_REPLACED =
+            "com.edgeswarm.node.action.PACKAGE_REPLACED"
+
         // SWARM_ANDROID_FCM_WAKE_BRIDGE_V1
         const val ACTION_FCM_WAKE =
             "com.edgeswarm.node.action.FCM_WAKE"
@@ -742,6 +746,16 @@ class SentinelService : Service() {
         val isFcmWake =
             intent?.action == ACTION_FCM_WAKE
 
+        val isPackageReplaceResume =
+            intent?.action == ACTION_PACKAGE_REPLACED
+
+        if (isPackageReplaceResume) {
+            Log.i(
+                "EdgeSwarm",
+                "ANDROID_PACKAGE_REPLACE_RESUME_V1 received"
+            )
+        }
+
         val fcmWakeTaskId =
             intent
                 ?.getStringExtra(
@@ -768,11 +782,17 @@ class SentinelService : Service() {
         if (intent?.action == ACTION_STOP_NODE) {
             Log.d(
                 "EdgeSwarm",
-                "Node stop requested from notification."
+                "Node stop requested."
             )
+
             setNodeEnabledPreference(false)
             isServiceRunning = false
-            stopSelf()
+
+            sendAndroidStateSyncV1(
+                providerActivated = false,
+                stopAfterSync = true
+            )
+
             return START_NOT_STICKY
         }
 
@@ -865,11 +885,12 @@ class SentinelService : Service() {
                 .orEmpty()
 
         // SWARM_ANDROID_FCM_AUTH_STORAGE_RESTORE_V2
+        // ANDROID_PACKAGE_REPLACE_AUTH_RESTORE_V1
         //
         // Android background lifecycle handling may leave Auth waiting for
-        // foreground initialization. FCM wake therefore restores the saved
-        // provider session directly from persistent Auth storage.
-        if (isFcmWake) {
+        // foreground initialization. FCM wake and package replacement restore
+        // the saved provider session directly from persistent Auth storage.
+        if (isFcmWake || isPackageReplaceResume) {
             val authStorageRestore =
                 runCatching {
                     runBlocking {
@@ -927,13 +948,21 @@ class SentinelService : Service() {
                     "tokenPresent=${resolvedAccessToken.isNotBlank()}"
             )
 
-            if (isFcmWake) {
-                // Preserve the user's explicit node-enabled intent.
-                // A later FCM wake may succeed once auth restoration is ready.
+            if (isFcmWake || isPackageReplaceResume) {
+                // Preserve the user's explicit node-enabled intent across
+                // transient background lifecycle/auth restoration failures.
+                val restoreSource =
+                    if (isPackageReplaceResume) {
+                        "package_replace"
+                    } else {
+                        "fcm_wake"
+                    }
+
                 Log.w(
                     "EdgeSwarm",
-                    "ANDROID_FCM_AUTH_RESTORE_V1 " +
-                        "node_enabled preserved after transient wake failure."
+                    "ANDROID_BACKGROUND_AUTH_RESTORE_V1 " +
+                        "node_enabled preserved after transient restore failure " +
+                        "source=$restoreSource"
                 )
             } else {
                 setNodeEnabledPreference(false)
@@ -1461,7 +1490,9 @@ class SentinelService : Service() {
     private fun sendNodeHeartbeat(
         hardwareId: String,
         providerEmail: String,
-        currentTaskIds: List<Int> = emptyList()
+        currentTaskIds: List<Int> = emptyList(),
+        stateSyncOnly: Boolean = false,
+        providerActivated: Boolean? = null
     ) {
         try {
             val heartbeatWalletAddress = getNodeCredentials(providerEmail).address
@@ -1469,13 +1500,31 @@ class SentinelService : Service() {
 
             val batteryInfo = getBatteryInfoForHeartbeat()
             val batteryTempC = getBatteryTempCForHeartbeat()
-            val level2Ready = isLevel2Ready()
-            val capabilitiesList = getAndroidCapabilities()
+            val level2Certified =
+                isLevel2Certified()
+
+            val level2Advertised =
+                allowNeuralTasks &&
+                    level2Certified
+
+            val neuralResourceBlockReason =
+                if (level2Advertised) {
+                    neuralResourceConstraintReason()
+                } else {
+                    null
+                }
+
+            val level2ExecutionReady =
+                level2Advertised &&
+                    neuralResourceBlockReason == null
+
+            val capabilitiesList =
+                getAndroidHeartbeatCapabilities()
             val capabilities = JSONArray().apply {
                 capabilitiesList.forEach { put(it) }
             }
             val eligibleModelCapabilities = JSONArray().apply {
-                if (level2Ready) {
+                if (level2Advertised) {
                     put(
                         checkNotNull(level2ActiveCapability)
                     )
@@ -1483,21 +1532,21 @@ class SentinelService : Service() {
             }
 
             val level2ModelStatus = when {
-                level2Ready -> "ready"
+                level2Advertised -> "ready"
                 !allowNeuralTasks -> "not_required"
                 level2LastError != null -> "error"
                 else -> "certification_pending"
             }
 
             val level2ModelCapability =
-                if (level2Ready) {
+                if (level2Advertised) {
                     checkNotNull(level2ActiveCapability)
                 } else {
                     null
                 }
 
             val level2ModelId =
-                if (level2Ready) {
+                if (level2Advertised) {
                     checkNotNull(level2ActiveModelId)
                 } else {
                     "none"
@@ -1545,23 +1594,23 @@ class SentinelService : Service() {
                 .put("modelId", level2ModelId)
                 .put(
                     "edgeLevel",
-                    if (level2Ready) 2 else 1
+                    if (level2Advertised) 2 else 1
                 )
                 .put(
                     "edgeLevelLabel",
-                    if (level2Ready) "Level 2" else "Level 1"
+                    if (level2Advertised) "Level 2" else "Level 1"
                 )
                 .put(
                     "edge_level",
-                    if (level2Ready) 2 else 1
+                    if (level2Advertised) 2 else 1
                 )
                 .put(
                     "edge_level_label",
-                    if (level2Ready) "Level 2" else "Level 1"
+                    if (level2Advertised) "Level 2" else "Level 1"
                 )
                 .put(
                     "runtime",
-                    if (level2Ready) {
+                    if (level2Advertised) {
                         "litert-lm"
                     } else {
                         "android-kotlin-deterministic-v2"
@@ -1569,7 +1618,7 @@ class SentinelService : Service() {
                 )
                 .put(
                     "runtimeAcceleration",
-                    if (level2Ready) {
+                    if (level2Advertised) {
                         level2ActiveBackend ?: "unknown"
                     } else {
                         "cpu"
@@ -1578,7 +1627,7 @@ class SentinelService : Service() {
                 .put("canReceivePaidJobs", capabilitiesList.isNotEmpty())
                 .put(
                     "canReceiveNeuralJobs",
-                    level2Ready
+                    level2ExecutionReady
                 )
                 .put("status", "online")
                 .put("startedAt", java.time.Instant.ofEpochMilli(nodeStartedAtMs).toString())
@@ -1587,7 +1636,7 @@ class SentinelService : Service() {
                 .put("concurrencyLimit", androidSchedulerConcurrencyLimit)
                 .put(
                     "certifiedNeuralConcurrency",
-                    if (level2Ready) {
+                    if (level2Advertised) {
                         androidCertifiedNeuralConcurrency
                     } else {
                         0
@@ -1599,6 +1648,20 @@ class SentinelService : Service() {
                 .put("playIntegritySupported", true)
                 .put("playIntegrityMode", "classic_nonce_v1")
                 .put("debugBuild", BuildConfig.DEBUG)
+
+            if (stateSyncOnly) {
+                payload.put(
+                    "stateSyncOnly",
+                    true
+                )
+            }
+
+            providerActivated?.let {
+                payload.put(
+                    "providerActivated",
+                    it
+                )
+            }
 
             val migrationHardwareId =
                 previousHardwareIdForMigrationV1
@@ -1632,13 +1695,15 @@ class SentinelService : Service() {
                         "modelStatus=$level2ModelStatus " +
                         "modelId=$level2ModelId " +
                         "modelCapability=${level2ModelCapability ?: "none"} " +
-                        "edgeLevel=${if (level2Ready) 2 else 1} " +
-                        "acceleration=${if (level2Ready) {
+                        "edgeLevel=${if (level2Advertised) 2 else 1} " +
+                        "acceleration=${if (level2Advertised) {
                             level2ActiveBackend ?: "unknown"
                         } else {
                             "cpu"
                         }} " +
-                        "neural=$level2Ready"
+                        "certified=$level2Certified " +
+                        "executionReady=$level2ExecutionReady " +
+                        "resourceBlock=${neuralResourceBlockReason ?: "none"}"
                 )
             }
 
@@ -1681,6 +1746,42 @@ class SentinelService : Service() {
                 )
             }
 
+            val stateMetadata =
+                payload.optJSONObject("metadata")
+                    ?: JSONObject()
+
+            stateMetadata.put(
+                "providerActivated",
+                getSharedPreferences(
+                    NODE_SETTINGS_PREFS,
+                    MODE_PRIVATE
+                ).getBoolean(
+                    PREF_NODE_ENABLED,
+                    false
+                )
+            )
+
+            stateMetadata.put(
+                "neuralCertified",
+                level2Certified
+            )
+
+            stateMetadata.put(
+                "neuralExecutionAvailable",
+                level2ExecutionReady
+            )
+
+            stateMetadata.put(
+                "neuralResourceBlockReason",
+                neuralResourceBlockReason
+                    ?: JSONObject.NULL
+            )
+
+            payload.put(
+                "metadata",
+                stateMetadata
+            )
+
             val body = payload
                 .toString()
                 .toRequestBody("application/json".toMediaType())
@@ -1695,7 +1796,7 @@ class SentinelService : Service() {
                     val responseBody = response.body?.string().orEmpty()
 
                     if (response.isSuccessful) {
-                        if (migrationWasRequested) {
+                        if (migrationWasRequested && !stateSyncOnly) {
                             markHardwareIdentityMigrationCompletedV1()
                             Log.i(
                                 "EdgeSwarm",
@@ -1703,7 +1804,14 @@ class SentinelService : Service() {
                             )
                         }
 
-                        Log.d("EdgeSwarm", "Heartbeat sent.")
+                        Log.d(
+                            "EdgeSwarm",
+                            if (stateSyncOnly) {
+                                "Node state sync sent."
+                            } else {
+                                "Heartbeat sent."
+                            }
+                        )
                         return
                     }
 
@@ -1728,6 +1836,51 @@ class SentinelService : Service() {
             }
         } catch (e: Exception) {
             Log.w("EdgeSwarm", "Heartbeat error: ${e.message}")
+        }
+    }
+
+    // ANDROID_NODE_STATE_SYNC_V1
+    // Sends state without refreshing scheduler heartbeat liveness.
+    private fun sendAndroidStateSyncV1(
+        providerActivated: Boolean? = null,
+        stopAfterSync: Boolean = false
+    ) {
+        serviceScope.launch(Dispatchers.IO) {
+            try {
+                val providerEmail =
+                    getSharedPreferences(
+                        APP_PREFS,
+                        MODE_PRIVATE
+                    ).getString(
+                        "auth_email",
+                        null
+                    )?.trim().orEmpty()
+
+                val hardwareId =
+                    persistedUnifiedHardwareIdV1()
+
+                if (
+                    providerEmail.isBlank() ||
+                    hardwareId.isNullOrBlank()
+                ) {
+                    Log.w(
+                        "EdgeSwarm",
+                        "ANDROID_NODE_STATE_SYNC_V1 skipped: provider identity unavailable."
+                    )
+                    return@launch
+                }
+
+                sendNodeHeartbeat(
+                    hardwareId = hardwareId,
+                    providerEmail = providerEmail,
+                    stateSyncOnly = true,
+                    providerActivated = providerActivated
+                )
+            } finally {
+                if (stopAfterSync) {
+                    stopSelf()
+                }
+            }
         }
     }
 
@@ -1828,6 +1981,10 @@ class SentinelService : Service() {
                     "Android engine started. Level 2 activates after verified self-test."
                 )
                 maybeSendNodeHeartbeat(hardwareId, userEmail, force = true)
+
+                sendAndroidStateSyncV1(
+                    providerActivated = true
+                )
 
                 while (isServiceRunning) {
                     val thermalConstrained =
@@ -3746,6 +3903,10 @@ class SentinelService : Service() {
             androidCertifiedNeuralConcurrency = 1
             level2LastError = null
 
+            sendAndroidStateSyncV1(
+                providerActivated = true
+            )
+
             publishLevel2Status(
                 "Neural ready - ${restored.modelId} - " +
                     "${restored.backend.telemetryName.uppercase()} - " +
@@ -3874,6 +4035,10 @@ class SentinelService : Service() {
                 // Android production remains single-lane.
                 androidCertifiedNeuralConcurrency = 1
                 level2LastError = null
+
+                sendAndroidStateSyncV1(
+                    providerActivated = true
+                )
 
                 // MOBILE_COLD_READY_LEVEL2_V2
                 // Preserve verified eligibility while releasing
@@ -4097,10 +4262,10 @@ class SentinelService : Service() {
         return runtime
     }
 
-    private fun isLevel2Ready(): Boolean {
-        return allowNeuralTasks &&
-            level2CertificationPassed &&
-            neuralResourceConstraintReason() == null &&
+    // ANDROID_CERTIFIED_CAPABILITY_RUNTIME_READINESS_V1
+    // Certification is persistent. Resource readiness is transient.
+    private fun isLevel2Certified(): Boolean {
+        return level2CertificationPassed &&
             !level2ActiveModelId.isNullOrBlank() &&
             !level2ActiveModelPath.isNullOrBlank() &&
             level2ActiveBackendType != null &&
@@ -4109,6 +4274,38 @@ class SentinelService : Service() {
                     "Neural-Inference-",
                     ignoreCase = true
                 ) == true
+    }
+
+    private fun isLevel2Ready(): Boolean {
+        return allowNeuralTasks &&
+            isLevel2Certified() &&
+            neuralResourceConstraintReason() == null
+    }
+
+    // Stable capabilities for heartbeat/control-plane certification.
+    // The existing getAndroidCapabilities() remains execution-ready
+    // and is still used by /swarm/get-jobs polling.
+    private fun getAndroidHeartbeatCapabilities(): List<String> {
+        return buildList {
+            add("Exact-Extraction")
+
+            if (allowScrapingTasks) {
+                add("Data-Scraper")
+            }
+
+            if (allowComputeTasks) {
+                add("Distributed-Compute")
+            }
+
+            if (
+                allowNeuralTasks &&
+                isLevel2Certified()
+            ) {
+                level2ActiveCapability
+                    ?.takeIf(String::isNotBlank)
+                    ?.let(::add)
+            }
+        }
     }
 
     private fun getAndroidCapabilities(): List<String> {

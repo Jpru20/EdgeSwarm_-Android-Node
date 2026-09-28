@@ -33,8 +33,8 @@ android {
         applicationId = "com.edgeswarm.node"
         minSdk = 26
         targetSdk = 35
-        versionCode = 168
-        versionName = "1.6.0"
+        versionCode = 169
+        versionName = "1.6.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // ANDROID_RELEASE_ARM64_ONLY_V1

@@ -1290,6 +1290,94 @@ fun SentinelScreen(
         mutableStateOf<String?>(null)
     }
 
+    // SWARM_ANDROID_AUTO_UPDATE_V1
+    var androidUpdatePreparing by remember {
+        mutableStateOf(false)
+    }
+
+    var preparedAndroidUpdate by remember {
+        mutableStateOf<AndroidAutoUpdater.PreparedUpdate?>(null)
+    }
+
+    var androidAutoUpdateStatus by remember {
+        mutableStateOf<String?>(null)
+    }
+
+    val unknownSourcesLauncher =
+        androidx.activity.compose.rememberLauncherForActivityResult(
+            contract =
+                androidx.activity.result.contract
+                    .ActivityResultContracts
+                    .StartActivityForResult()
+        ) {
+            val prepared =
+                preparedAndroidUpdate
+
+            when {
+                prepared == null -> {
+                    androidAutoUpdateStatus =
+                        "Verified update is no longer available."
+                }
+
+                !AndroidAutoUpdater
+                    .canRequestPackageInstalls(context) -> {
+                    androidAutoUpdateStatus =
+                        "Install permission was not granted."
+                }
+
+                else -> {
+                    runCatching {
+                        AndroidAutoUpdater
+                            .launchInstaller(
+                                context,
+                                prepared.apkFile
+                            )
+                    }.onFailure { error ->
+                        androidAutoUpdateStatus =
+                            error.message
+                                ?: "Unable to open Android installer."
+                    }
+                }
+            }
+        }
+
+    val requestVerifiedAndroidInstall:
+        (AndroidAutoUpdater.PreparedUpdate) -> Unit = { prepared ->
+
+        if (
+            AndroidAutoUpdater
+                .canRequestPackageInstalls(context)
+        ) {
+            runCatching {
+                AndroidAutoUpdater
+                    .launchInstaller(
+                        context,
+                        prepared.apkFile
+                    )
+            }.onFailure { error ->
+                androidAutoUpdateStatus =
+                    error.message
+                        ?: "Unable to open Android installer."
+            }
+        } else {
+            androidAutoUpdateStatus =
+                "Allow Swarm to install app updates."
+
+            runCatching {
+                unknownSourcesLauncher.launch(
+                    AndroidAutoUpdater
+                        .unknownSourcesSettingsIntent(
+                            context
+                        )
+                )
+            }.onFailure { error ->
+                androidAutoUpdateStatus =
+                    error.message
+                        ?: "Unable to open install-permission settings."
+            }
+        }
+    }
+
     val updateRequired =
         androidReleaseInfo != null &&
         androidReleaseInfo
@@ -1301,14 +1389,104 @@ fun SentinelScreen(
             androidReleaseInfo?.minimumVersion
         ) < 0
 
+    val updateAvailable =
+        androidReleaseInfo != null &&
+        androidReleaseInfo
+            ?.version
+            .orEmpty()
+            .isNotBlank() &&
+        compareAppVersions(
+            currentAppVersion,
+            androidReleaseInfo?.version
+        ) < 0
+
     LaunchedEffect(Unit) {
         androidReleaseLoading = true
         androidReleaseError = null
+        androidAutoUpdateStatus = null
 
         try {
-            androidReleaseInfo = fetchAndroidReleaseInfo()
+            val release =
+                fetchAndroidReleaseInfo()
+
+            androidReleaseInfo =
+                release
+
+            val newerRelease =
+                release.version.isNotBlank() &&
+                compareAppVersions(
+                    currentAppVersion,
+                    release.version
+                ) < 0
+
+            if (newerRelease) {
+                androidUpdatePreparing = true
+
+                androidAutoUpdateStatus =
+                    "Downloading and verifying v${release.version}..."
+
+                Log.i(
+                    "EdgeSwarmUpdate",
+                    "SWARM_ANDROID_AUTO_UPDATE_V1 " +
+                        "current=$currentAppVersion " +
+                        "target=${release.version} " +
+                        "action=download"
+                )
+
+                try {
+                    val prepared =
+                        AndroidAutoUpdater
+                            .downloadAndVerify(
+                                context =
+                                    context.applicationContext,
+                                expectedVersion =
+                                    release.version,
+                                downloadUrl =
+                                    release.downloadUrl,
+                                expectedSha256 =
+                                    release.sha256,
+                                expectedPackageName =
+                                    release.packageName
+                            )
+
+                    preparedAndroidUpdate =
+                        prepared
+
+                    androidAutoUpdateStatus =
+                        "Verified v${prepared.versionName}. Ready to install."
+
+                    Log.i(
+                        "EdgeSwarmUpdate",
+                        "SWARM_ANDROID_AUTO_UPDATE_V1 " +
+                            "target=${prepared.versionName} " +
+                            "versionCode=${prepared.versionCode} " +
+                            "sha256=${prepared.sha256} " +
+                            "action=verified"
+                    )
+
+                    requestVerifiedAndroidInstall(
+                        prepared
+                    )
+                } catch (error: Throwable) {
+                    androidAutoUpdateStatus =
+                        error.message
+                            ?: "Automatic update preparation failed."
+
+                    Log.e(
+                        "EdgeSwarmUpdate",
+                        "SWARM_ANDROID_AUTO_UPDATE_V1 " +
+                            "action=failed " +
+                            "reason=${error.message}",
+                        error
+                    )
+                } finally {
+                    androidUpdatePreparing = false
+                }
+            }
         } catch (error: Exception) {
-            androidReleaseError = error.message ?: "Unable to check latest Android version."
+            androidReleaseError =
+                error.message
+                    ?: "Unable to check latest Android version."
         } finally {
             androidReleaseLoading = false
         }
@@ -1578,9 +1756,23 @@ fun SentinelScreen(
 
             nodeEnabled = false
 
-            context.stopService(
-                serviceIntent
-            )
+            runCatching {
+                serviceIntent.action =
+                    SentinelService.ACTION_STOP_NODE
+
+                context.startService(
+                    serviceIntent
+                )
+            }.onFailure { error ->
+                Log.w(
+                    "EdgeSwarm",
+                    "Provider deactivation dispatch failed: ${error.message}"
+                )
+
+                context.stopService(
+                    serviceIntent
+                )
+            }
         }
     }
 
@@ -2108,6 +2300,12 @@ fun SentinelScreen(
                         "Update",
                     value =
                         when {
+                            androidUpdatePreparing ->
+                                "Downloading"
+
+                            preparedAndroidUpdate != null ->
+                                "Verified"
+
                             androidReleaseLoading ->
                                 "Checking"
 
@@ -2116,6 +2314,9 @@ fun SentinelScreen(
 
                             updateRequired ->
                                 "Required"
+
+                            updateAvailable ->
+                                "Available"
 
                             else ->
                                 "Up to date"

@@ -3,6 +3,7 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
@@ -45,6 +46,16 @@
                 android:value="User-activated distributed AI provider that sleeps while idle, wakes on high-priority FCM work signals, and performs bounded local deterministic or neural inference only while handling eligible work." />
         </service>
 
+        <!-- ANDROID_PACKAGE_REPLACE_RESUME_V1 -->
+        <receiver
+            android:name=".SwarmPackageReplacedReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
         <!-- SWARM_ANDROID_FCM_SERVICE_V1 -->
         <service
             android:name=".SwarmFirebaseMessagingService"
@@ -53,6 +64,17 @@
                 <action android:name="com.google.firebase.MESSAGING_EVENT" />
             </intent-filter>
         </service>
+
+        <!-- SWARM_ANDROID_VERIFIED_AUTO_UPDATE_V1 -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.update-files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/swarm_update_paths" />
+        </provider>
 
         <provider
             android:name="androidx.startup.InitializationProvider"
