@@ -1770,6 +1770,11 @@ class SentinelService : Service() {
             )
 
             stateMetadata.put(
+                "dataScraperSsrfGuardV1",
+                true
+            )
+
+            stateMetadata.put(
                 "neuralCertified",
                 level2Certified
             )
