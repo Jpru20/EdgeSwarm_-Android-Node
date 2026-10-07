@@ -25,8 +25,13 @@ import com.google.android.play.core.integrity.IntegrityManagerFactory
 import com.google.android.play.core.integrity.IntegrityTokenRequest
 import io.github.jan.supabase.auth.auth
 import java.io.File
+import java.io.ByteArrayOutputStream
 import java.io.FileInputStream
 import java.io.IOException
+import java.net.Inet4Address
+import java.net.Inet6Address
+import java.net.InetAddress
+import java.net.UnknownHostException
 import java.net.URLEncoder
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -47,6 +52,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import okhttp3.Dns
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -2195,93 +2203,73 @@ class SentinelService : Service() {
                                             "Data-Scraper task did not contain an HTTPS URL."
                                         )
 
-                                val request = Request.Builder()
-                                    .url(scrapeUrl)
-                                    .header(
-                                        "User-Agent",
-                                        "Mozilla/5.0 (Linux; Android " +
-                                            "${Build.VERSION.RELEASE}; ${Build.MODEL}) " +
-                                            "AppleWebKit/537.36 (KHTML, like Gecko) " +
-                                            "Chrome/150.0.0.0 Mobile Safari/537.36 " +
-                                            "EdgeSwarm/${BuildConfig.VERSION_NAME}"
-                                    )
-                                    .header(
-                                        "Accept",
-                                        "text/html,application/xhtml+xml," +
-                                            "application/xml;q=0.9,*/*;q=0.8"
-                                    )
-                                    .header(
-                                        "Accept-Language",
-                                        "en-US,en;q=0.7"
-                                    )
-                                    .build()
-
-                                httpClient.newCall(request).execute().use {
-                                    response ->
-                                    if (!response.isSuccessful) {
-                                        throw IOException(
-                                            "Scrape failed: HTTP ${response.code}"
-                                        )
-                                    }
-
-                                    val body = response.body
-                                        ?.string()
-                                        .orEmpty()
-
-                                    if (body.isBlank()) {
-                                        throw IOException(
-                                            "Scrape failed: empty response body."
-                                        )
-                                    }
-
-                                    val noStyles = body.replace(
-                                        Regex(
-                                            "<style\\b[^<]*(?:(?!</style>)<[^<]*)*</style>",
-                                            RegexOption.IGNORE_CASE
-                                        ),
-                                        " "
+                                val (
+                                    finalScrapeUrl,
+                                    body
+                                ) =
+                                    fetchPublicScrapeTextV1(
+                                        scrapeUrl
                                     )
 
-                                    val noScripts = noStyles.replace(
-                                        Regex(
-                                            "<script\\b[^<]*(?:(?!</script>)<[^<]*)*</script>",
-                                            RegexOption.IGNORE_CASE
-                                        ),
-                                        " "
+                                if (body.isBlank()) {
+                                    throw IOException(
+                                        "scrape_response_empty"
                                     )
-
-                                    val cleanText = noScripts
-                                        .replace(Regex("<[^>]*>"), " ")
-                                        .replace(Regex("\\s+"), " ")
-                                        .trim()
-
-                                    val safeText =
-                                        cleanText.take(200_000)
-
-                                    val nodeAttestation = JSONObject()
-                                        .put("nodeType", "android")
-                                        .put(
-                                            "appVersion",
-                                            currentAttestationAppVersion()
-                                        )
-                                        .put(
-                                            "packageSha256",
-                                            packageSha256
-                                        )
-                                        .put(
-                                            "signingCertificateSha256",
-                                            signingCertificateSha256
-                                        )
-
-                                    aiOutput = JSONObject()
-                                        .put("source_url", scrapeUrl)
-                                        .put("content", safeText)
-                                        .put(
-                                            "node_attestation",
-                                            nodeAttestation
-                                        )
-                                        .toString()
                                 }
+
+                                val noStyles = body.replace(
+                                    Regex(
+                                        "<style\\b[^<]*(?:(?!</style>)<[^<]*)*</style>",
+                                        RegexOption.IGNORE_CASE
+                                    ),
+                                    " "
+                                )
+
+                                val noScripts = noStyles.replace(
+                                    Regex(
+                                        "<script\\b[^<]*(?:(?!</script>)<[^<]*)*</script>",
+                                        RegexOption.IGNORE_CASE
+                                    ),
+                                    " "
+                                )
+
+                                val cleanText = noScripts
+                                    .replace(Regex("<[^>]*>"), " ")
+                                    .replace(Regex("\\s+"), " ")
+                                    .trim()
+
+                                val safeText =
+                                    cleanText.take(200_000)
+
+                                val nodeAttestation = JSONObject()
+                                    .put("nodeType", "android")
+                                    .put(
+                                        "appVersion",
+                                        currentAttestationAppVersion()
+                                    )
+                                    .put(
+                                        "packageSha256",
+                                        packageSha256
+                                    )
+                                    .put(
+                                        "signingCertificateSha256",
+                                        signingCertificateSha256
+                                    )
+
+                                aiOutput = JSONObject()
+                                    .put(
+                                        "source_url",
+                                        finalScrapeUrl
+                                    )
+                                    .put(
+                                        "content",
+                                        safeText
+                                    )
+                                    .put(
+                                        "node_attestation",
+                                        nodeAttestation
+                                    )
+                                    .toString()
                             } else if (isExactExtractionTask) {
                                 aiOutput = runDeterministicExtraction(prompt)
                                     ?: throw IllegalArgumentException(
@@ -2861,6 +2849,556 @@ class SentinelService : Service() {
             put("sampleBase64", sampleBase64)
             put("checkpointValues", checkpointValues)
         }.toString()
+    }
+
+    // ANDROID_DATA_SCRAPER_SSRF_GUARD_V1
+    //
+    // Data-Scraper runs on a Provider-owned network. Client-controlled URLs
+    // must never be allowed to reach loopback, RFC1918/ULA, link-local,
+    // metadata, internal DNS, or arbitrary service ports.
+    private val scrapeMaxBodyBytesV1 =
+        2 * 1024 * 1024
+
+    private val scrapeMaxRedirectsV1 =
+        5
+
+    private fun scrapeIpv4PublicV1(
+        address: Inet4Address
+    ): Boolean {
+        val octets =
+            address.address.map {
+                it.toInt() and 0xff
+            }
+
+        val a = octets[0]
+        val b = octets[1]
+        val c = octets[2]
+
+        if (
+            a == 0 ||
+            a == 10 ||
+            a == 127 ||
+            a >= 224
+        ) {
+            return false
+        }
+
+        if (
+            a == 100 &&
+            b in 64..127
+        ) {
+            return false
+        }
+
+        if (
+            a == 169 &&
+            b == 254
+        ) {
+            return false
+        }
+
+        if (
+            a == 172 &&
+            b in 16..31
+        ) {
+            return false
+        }
+
+        if (
+            a == 192 &&
+            b == 168
+        ) {
+            return false
+        }
+
+        if (
+            a == 192 &&
+            b == 0 &&
+            c == 0
+        ) {
+            return false
+        }
+
+        if (
+            a == 192 &&
+            b == 0 &&
+            c == 2
+        ) {
+            return false
+        }
+
+        if (
+            a == 192 &&
+            b == 88 &&
+            c == 99
+        ) {
+            return false
+        }
+
+        if (
+            a == 198 &&
+            b in 18..19
+        ) {
+            return false
+        }
+
+        if (
+            a == 198 &&
+            b == 51 &&
+            c == 100
+        ) {
+            return false
+        }
+
+        if (
+            a == 203 &&
+            b == 0 &&
+            c == 113
+        ) {
+            return false
+        }
+
+        return true
+    }
+
+    private fun scrapeIpv6PublicV1(
+        address: Inet6Address
+    ): Boolean {
+        if (
+            address.isAnyLocalAddress ||
+            address.isLoopbackAddress ||
+            address.isLinkLocalAddress ||
+            address.isMulticastAddress
+        ) {
+            return false
+        }
+
+        val bytes =
+            address.address
+
+        val first =
+            bytes[0].toInt() and 0xff
+
+        // fc00::/7 — unique local.
+        if (
+            first and 0xfe ==
+            0xfc
+        ) {
+            return false
+        }
+
+        // 2001:db8::/32 — documentation.
+        if (
+            (bytes[0].toInt() and 0xff) == 0x20 &&
+            (bytes[1].toInt() and 0xff) == 0x01 &&
+            (bytes[2].toInt() and 0xff) == 0x0d &&
+            (bytes[3].toInt() and 0xff) == 0xb8
+        ) {
+            return false
+        }
+
+        return true
+    }
+
+    private fun scrapeIpPublicV1(
+        address: InetAddress
+    ): Boolean =
+        when (address) {
+            is Inet4Address ->
+                scrapeIpv4PublicV1(
+                    address
+                )
+
+            is Inet6Address ->
+                scrapeIpv6PublicV1(
+                    address
+                )
+
+            else ->
+                false
+        }
+
+    private fun scrapeHostnameReservedV1(
+        host: String
+    ): Boolean {
+        val normalized =
+            host
+                .trim()
+                .trimEnd('.')
+                .lowercase()
+
+        return (
+            normalized == "localhost" ||
+            normalized.endsWith(
+                ".localhost"
+            ) ||
+            normalized ==
+                "localhost.localdomain" ||
+            normalized.endsWith(
+                ".local"
+            ) ||
+            normalized.endsWith(
+                ".internal"
+            ) ||
+            normalized.endsWith(
+                ".lan"
+            ) ||
+            normalized.endsWith(
+                ".home"
+            ) ||
+            normalized.endsWith(
+                ".home.arpa"
+            )
+        )
+    }
+
+    private data class ValidatedScrapeTargetV1(
+        val url: HttpUrl,
+        val addresses:
+            List<InetAddress>
+    )
+
+    private fun validateScrapeTargetV1(
+        rawUrl: String
+    ): ValidatedScrapeTargetV1 {
+        val url =
+            rawUrl
+                .toHttpUrlOrNull()
+                ?: throw IOException(
+                    "scrape_url_invalid"
+                )
+
+        if (
+            url.scheme != "https"
+        ) {
+            throw IOException(
+                "scrape_url_https_required"
+            )
+        }
+
+        if (
+            url.username.isNotEmpty() ||
+            url.password.isNotEmpty()
+        ) {
+            throw IOException(
+                "scrape_url_userinfo_not_allowed"
+            )
+        }
+
+        if (
+            url.port != 443
+        ) {
+            throw IOException(
+                "scrape_url_port_not_allowed"
+            )
+        }
+
+        val host =
+            url.host
+                .trim()
+
+        if (
+            host.isBlank() ||
+            scrapeHostnameReservedV1(
+                host
+            )
+        ) {
+            throw IOException(
+                "scrape_url_reserved_host"
+            )
+        }
+
+        val addresses =
+            try {
+                Dns.SYSTEM.lookup(
+                    host
+                )
+            } catch (
+                error:
+                    UnknownHostException
+            ) {
+                throw IOException(
+                    "scrape_dns_resolution_failed",
+                    error
+                )
+            }
+
+        if (
+            addresses.isEmpty()
+        ) {
+            throw IOException(
+                "scrape_dns_resolution_empty"
+            )
+        }
+
+        if (
+            addresses.any {
+                !scrapeIpPublicV1(it)
+            }
+        ) {
+            throw IOException(
+                "scrape_url_resolves_non_public_address"
+            )
+        }
+
+        return ValidatedScrapeTargetV1(
+            url =
+                url,
+            addresses =
+                addresses
+        )
+    }
+
+    private fun scrapeContentTypeAllowedV1(
+        value: String
+    ): Boolean {
+        val normalized =
+            value
+                .substringBefore(';')
+                .trim()
+                .lowercase()
+
+        return (
+            normalized.startsWith(
+                "text/"
+            ) ||
+            normalized in
+                setOf(
+                    "application/json",
+                    "application/xml",
+                    "application/xhtml+xml",
+                    "application/rss+xml",
+                    "application/atom+xml"
+                )
+        )
+    }
+
+    private fun readBoundedScrapeBodyV1(
+        body:
+            okhttp3.ResponseBody
+    ): String {
+        val declaredLength =
+            body.contentLength()
+
+        if (
+            declaredLength >
+            scrapeMaxBodyBytesV1
+        ) {
+            throw IOException(
+                "scrape_response_too_large"
+            )
+        }
+
+        val output =
+            ByteArrayOutputStream()
+
+        body.byteStream().use {
+            input ->
+            val buffer =
+                ByteArray(
+                    16 * 1024
+                )
+
+            var total =
+                0
+
+            while (true) {
+                val count =
+                    input.read(
+                        buffer
+                    )
+
+                if (count < 0) {
+                    break
+                }
+
+                total +=
+                    count
+
+                if (
+                    total >
+                    scrapeMaxBodyBytesV1
+                ) {
+                    throw IOException(
+                        "scrape_response_too_large"
+                    )
+                }
+
+                output.write(
+                    buffer,
+                    0,
+                    count
+                )
+            }
+        }
+
+        return output
+            .toByteArray()
+            .toString(
+                Charsets.UTF_8
+            )
+    }
+
+    private fun fetchPublicScrapeTextV1(
+        rawUrl: String
+    ): Pair<String, String> {
+        var current =
+            rawUrl
+
+        for (
+            redirectIndex
+            in 0..scrapeMaxRedirectsV1
+        ) {
+            val target =
+                validateScrapeTargetV1(
+                    current
+                )
+
+            val pinnedHost =
+                target.url.host
+
+            val pinnedAddresses =
+                target.addresses
+
+            val pinnedDns =
+                Dns { hostname ->
+                    if (
+                        hostname.equals(
+                            pinnedHost,
+                            ignoreCase = true
+                        )
+                    ) {
+                        pinnedAddresses
+                    } else {
+                        throw UnknownHostException(
+                            "scrape_dns_host_mismatch"
+                        )
+                    }
+                }
+
+            val scrapeClient =
+                httpClient
+                    .newBuilder()
+                    .followRedirects(
+                        false
+                    )
+                    .followSslRedirects(
+                        false
+                    )
+                    .dns(
+                        pinnedDns
+                    )
+                    .build()
+
+            val request =
+                Request.Builder()
+                    .url(
+                        target.url
+                    )
+                    .header(
+                        "User-Agent",
+                        "Mozilla/5.0 (Linux; Android " +
+                            "${Build.VERSION.RELEASE}; ${Build.MODEL}) " +
+                            "AppleWebKit/537.36 (KHTML, like Gecko) " +
+                            "Chrome/150.0.0.0 Mobile Safari/537.36 " +
+                            "EdgeSwarm/${BuildConfig.VERSION_NAME}"
+                    )
+                    .header(
+                        "Accept",
+                        "text/html,application/xhtml+xml," +
+                            "application/xml;q=0.9,application/json;q=0.8," +
+                            "text/plain;q=0.7"
+                    )
+                    .header(
+                        "Accept-Language",
+                        "en-US,en;q=0.7"
+                    )
+                    .build()
+
+            scrapeClient
+                .newCall(request)
+                .execute()
+                .use {
+                    response ->
+                    if (
+                        response.code in
+                        300..399
+                    ) {
+                        if (
+                            redirectIndex >=
+                            scrapeMaxRedirectsV1
+                        ) {
+                            throw IOException(
+                                "scrape_redirect_limit_exceeded"
+                            )
+                        }
+
+                        val location =
+                            response.header(
+                                "Location"
+                            )
+                                ?: throw IOException(
+                                    "scrape_redirect_location_missing"
+                                )
+
+                        current =
+                            target.url
+                                .resolve(
+                                    location
+                                )
+                                ?.toString()
+                                ?: throw IOException(
+                                    "scrape_redirect_url_invalid"
+                                )
+
+                        return@use
+                    }
+
+                    if (
+                        !response.isSuccessful
+                    ) {
+                        throw IOException(
+                            "scrape_http_status:${response.code}"
+                        )
+                    }
+
+                    val responseBody =
+                        response.body
+                            ?: throw IOException(
+                                "scrape_response_body_missing"
+                            )
+
+                    val contentType =
+                        responseBody
+                            .contentType()
+                            ?.toString()
+
+                    if (
+                        contentType != null &&
+                        !scrapeContentTypeAllowedV1(
+                            contentType
+                        )
+                    ) {
+                        throw IOException(
+                            "scrape_response_content_type_not_allowed"
+                        )
+                    }
+
+                    val text =
+                        readBoundedScrapeBodyV1(
+                            responseBody
+                        )
+
+                    return Pair(
+                        target.url.toString(),
+                        text
+                    )
+                }
+        }
+
+        throw IOException(
+            "scrape_redirect_limit_exceeded"
+        )
     }
 
     private fun extractFirstHttpUrl(value: String): String? {
