@@ -5,7 +5,7 @@
         android:width="108dp"
         android:height="108dp">
         <bitmap
-            android:src="@drawable/swarm_logo_source"
+            android:src="@drawable/swarm_brand_launcher_v170"
             android:gravity="fill"
             android:antialias="true"
             android:filter="true" />

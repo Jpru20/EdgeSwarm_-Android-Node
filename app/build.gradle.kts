@@ -33,8 +33,8 @@ android {
         applicationId = "com.edgeswarm.node"
         minSdk = 26
         targetSdk = 35
-        versionCode = 169
-        versionName = "1.6.1"
+        versionCode = 170
+        versionName = "1.7.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // ANDROID_RELEASE_ARM64_ONLY_V1
@@ -148,6 +148,7 @@ configurations.all {
 }
 
 dependencies {
+    testImplementation("junit:junit:4.13.2")
     // SWARM_ANDROID_FCM_CLIENT_V1
     implementation(platform("com.google.firebase:firebase-bom:34.19.0"))
     implementation("com.google.firebase:firebase-messaging")

@@ -157,6 +157,9 @@ class SentinelService : Service() {
     private val interactivePollIntervalMs = 10_000L
 
     private val gcpBaseUrl = EdgeSwarmConfig.apiBaseUrl
+    // Task-bound, server-negotiated SWCT/1 result authorization.
+    private val swctResultReadyTaskIdsV170 =
+        java.util.concurrent.ConcurrentHashMap.newKeySet<Int>()
     private val gcpUploadUrl = "$gcpBaseUrl/enterprise/submit-result"
     private val gcpJobsUrl = "$gcpBaseUrl/swarm/get-jobs"
 
@@ -3690,11 +3693,19 @@ class SentinelService : Service() {
                 .put("fileHash", properFileHash)
                 .put("payload", payloadJson)
 
-            val requestBody = rootJson
-                .toString()
-                .toRequestBody(
-                    "application/json; charset=utf-8".toMediaType()
-                )
+            // Preserve the exact signed JSON envelope before encoding transport.
+            val signedJsonBytesV170 = rootJson.toString().toByteArray(Charsets.UTF_8)
+            val jsonRequestBodyV170 = signedJsonBytesV170
+                .toRequestBody("application/json; charset=utf-8".toMediaType())
+            var resultWireV170 = SwarmCompactTransportV170.chooseResult(
+                signedJsonBytesV170,
+                swctResultReadyTaskIdsV170.contains(taskId)
+            )
+            var requestBody = resultWireV170.bytes
+                .toRequestBody(resultWireV170.mediaType.toMediaType())
+            Log.i("EdgeSwarm", "SWCT_RESULT_V170 taskId=$taskId " +
+                "compact=${resultWireV170.compact} " +
+                "raw=${signedJsonBytesV170.size} wire=${resultWireV170.bytes.size}")
 
             Log.d(
                 "EdgeSwarm",
@@ -3754,6 +3765,7 @@ class SentinelService : Service() {
                         )
 
                         if (response.isSuccessful) {
+                            swctResultReadyTaskIdsV170.remove(taskId)
                             return true
                         }
 
@@ -3791,6 +3803,7 @@ class SentinelService : Service() {
                                         )
 
                                         if (authRetryResponse.isSuccessful) {
+                                            swctResultReadyTaskIdsV170.remove(taskId)
                                             return true
                                         }
                                     }
@@ -3807,7 +3820,22 @@ class SentinelService : Service() {
                             "Server rejected payload: $responseText"
                         )
 
+                        // Only an explicit backend SWCT-disabled rejection permits
+                        // retrying the same signed envelope as legacy JSON.
+                        val swctDisabledV170 = resultWireV170.compact &&
+                            responseCode == 400 &&
+                            responseText.contains("swct_disabled", ignoreCase = true)
+                        if (swctDisabledV170) {
+                            resultWireV170 = SwarmCompactTransportV170.WireBody(
+                                signedJsonBytesV170,
+                                "application/json; charset=utf-8", false
+                            )
+                            requestBody = jsonRequestBodyV170
+                            swctResultReadyTaskIdsV170.remove(taskId)
+                            Log.w("EdgeSwarm", "SWCT_RESULT_V170 backend_disabled; retry_json=true")
+                        }
                         val retryable =
+                            swctDisabledV170 ||
                             responseCode == 408 ||
                             responseCode == 425 ||
                             responseCode == 429 ||
@@ -4123,6 +4151,15 @@ class SentinelService : Service() {
         }
     }
 
+    private fun recordSwctResultReadyV170(task: JSONObject, ready: Boolean): JSONObject {
+        val id = task.optInt("taskId", -1)
+        if (id >= 0) {
+            if (ready) swctResultReadyTaskIdsV170.add(id)
+            else swctResultReadyTaskIdsV170.remove(id)
+        }
+        return task
+    }
+
     private fun fetchTaskFromMempool(hwId: String, providerEmail: String): JSONObject? {
         val pollStartedAt = SystemClock.elapsedRealtime()
         logTiming("poll_request_start")
@@ -4139,7 +4176,9 @@ class SentinelService : Service() {
                     "&version=$appVersion" +
                     "&appType=$appType"
 
-            var request = authenticatedRequestBuilder(requestUrl).build()
+            var request = authenticatedRequestBuilder(requestUrl)
+                .header("Accept", SwarmCompactTransportV170.ACCEPT)
+                .build()
             var authRefreshUsed = false
 
             for (authAttempt in 0..1) {
@@ -4147,14 +4186,26 @@ class SentinelService : Service() {
 
                 httpClient.newCall(request).execute().use { response ->
                     val elapsed = SystemClock.elapsedRealtime() - pollStartedAt
-                    val responseText = response.body?.string().orEmpty()
+                    val responseBytesV170 = response.body?.bytes() ?: ByteArray(0)
+                    val responseText = if (response.isSuccessful) {
+                        String(SwarmCompactTransportV170.decodeTaskResponse(
+                            response.header("Content-Type"), responseBytesV170
+                        ), Charsets.UTF_8)
+                    } else {
+                        String(responseBytesV170, Charsets.UTF_8)
+                    }
+                    val resultReadyV170 = response.header(
+                        SwarmCompactTransportV170.RESULT_READY_HEADER
+                    )?.trim() == "1"
                     logTiming("poll_response_received", elapsedMs = elapsed)
 
                     if (!response.isSuccessful) {
                         if (response.code == 401 && !authRefreshUsed) {
                             authRefreshUsed = true
                             if (refreshAccessTokenAfterUnauthorized() != null) {
-                                request = authenticatedRequestBuilder(requestUrl).build()
+                                request = authenticatedRequestBuilder(requestUrl)
+                                    .header("Accept", SwarmCompactTransportV170.ACCEPT)
+                                    .build()
                                 retryAfterRefresh = true
                                 Log.w("EdgeSwarm", "Task polling bearer refreshed; retrying once.")
                             }
@@ -4169,13 +4220,13 @@ class SentinelService : Service() {
                         val json = JSONObject(responseText.ifBlank { "{}" })
 
                         if (json.has("task") && !json.isNull("task")) {
-                            return json.getJSONObject("task")
+                            return recordSwctResultReadyV170(json.getJSONObject("task"), resultReadyV170)
                         }
 
                         if (json.has("tasks") && !json.isNull("tasks")) {
                             val tasks = json.getJSONArray("tasks")
                             if (tasks.length() > 0) {
-                                return tasks.getJSONObject(0)
+                                return recordSwctResultReadyV170(tasks.getJSONObject(0), resultReadyV170)
                             }
                         }
 

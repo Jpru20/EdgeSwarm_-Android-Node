@@ -2,12 +2,12 @@
 <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
     <item>
         <shape android:shape="rectangle">
-            <solid android:color="#000827" />
+            <solid android:color="@color/swarm_brand_background" />
         </shape>
     </item>
     <item android:gravity="center">
         <bitmap
-            android:src="@drawable/swarm_logo_source"
+            android:src="@drawable/swarm_brand_logo_v170"
             android:gravity="center"
             android:antialias="true"
             android:filter="true" />

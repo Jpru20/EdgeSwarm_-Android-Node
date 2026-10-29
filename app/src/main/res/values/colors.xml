@@ -7,4 +7,7 @@
     <color name="teal_700">#FF018786</color>
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
+    <color name="swarm_brand_background">#FCFAF4</color>
+    <color name="swarm_brand_primary">#007760</color>
+    <color name="swarm_brand_text">#0F1D1E</color>
 </resources>

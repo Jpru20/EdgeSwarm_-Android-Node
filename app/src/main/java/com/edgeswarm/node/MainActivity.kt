@@ -9,6 +9,7 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
@@ -28,6 +29,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.painterResource
+import com.xgpicks.edgeswarm.ui.theme.EdgeSwarmTheme
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontFamily
@@ -98,6 +101,7 @@ class MainActivity : ComponentActivity() {
         checkRequiredPermissions()
 
         setContent {
+            EdgeSwarmTheme(darkTheme = false, dynamicColor = false) {
             val context = LocalContext.current
             val scope = rememberCoroutineScope()
             val sharedPrefs = context.getSharedPreferences("EdgePrefs", MODE_PRIVATE)
@@ -128,7 +132,7 @@ class MainActivity : ComponentActivity() {
 
             Surface(
                 modifier = Modifier.fillMaxSize(),
-                color = Color(0xFF0B0E11)
+                color = SwarmBrandV170.Background
             ) {
                 if (!isLoggedIn) {
                     LoginPortalScreen(
@@ -168,7 +172,7 @@ class MainActivity : ComponentActivity() {
                             .fillMaxSize()
                             .statusBarsPadding(),
                         bottomBar = {},
-                        containerColor = Color(0xFFF7F7FA),
+                        containerColor = SwarmBrandV170.Background,
                         contentWindowInsets =
                             WindowInsets.safeDrawing.only(
                                 WindowInsetsSides.Horizontal +
@@ -179,7 +183,7 @@ class MainActivity : ComponentActivity() {
                             modifier = Modifier
                                 .fillMaxSize()
                                 .padding(innerPadding)
-                                .background(Color(0xFFF7F7FA))
+                                .background(SwarmBrandV170.Background)
                         ) {
                             when (selectedTab) {
                                 0 -> LedgeScreen(authenticatedUserEmail)
@@ -242,6 +246,7 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
+            }
             }
         }
     }
@@ -420,29 +425,28 @@ fun LoginPortalScreen(onAuthSuccess: (String) -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xFF0B0E11))
+            .background(SwarmBrandV170.Background)
             .padding(32.dp),
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Icon(
-            Icons.Default.Lock,
-            contentDescription = null,
-            tint = Color(0xFF03DAC5),
-            modifier = Modifier.size(64.dp)
+        Image(
+            painter = painterResource(R.drawable.swarm_brand_logo_v170),
+            contentDescription = "Swarm logo",
+            modifier = Modifier.size(92.dp)
         )
 
         Spacer(modifier = Modifier.height(16.dp))
 
         Text(
-            "EDGE SWARM NODE",
+            "Swarm",
             fontSize = 24.sp,
             fontWeight = FontWeight.Black,
-            color = Color.White,
-            fontFamily = FontFamily.Monospace
+            color = SwarmBrandV170.Text,
+            fontFamily = FontFamily.SansSerif
         )
 
-        Text("Mobile Node Authorization", fontSize = 12.sp, color = Color.Gray)
+        Text("Distributed AI Provider", fontSize = 12.sp, color = SwarmBrandV170.Muted)
 
         Spacer(modifier = Modifier.height(40.dp))
 
@@ -453,12 +457,12 @@ fun LoginPortalScreen(onAuthSuccess: (String) -> Unit) {
                 label = { Text("Provider Email") },
                 modifier = Modifier.fillMaxWidth(),
                 colors = OutlinedTextFieldDefaults.colors(
-                    focusedTextColor = Color.White,
-                    unfocusedTextColor = Color.White,
-                    cursorColor = Color.White,
-                    focusedBorderColor = Color(0xFF03DAC5),
-                    unfocusedLabelColor = Color.Gray,
-                    focusedLabelColor = Color.White
+                    focusedTextColor = SwarmBrandV170.Text,
+                    unfocusedTextColor = SwarmBrandV170.Text,
+                    cursorColor = SwarmBrandV170.Primary,
+                    focusedBorderColor = SwarmBrandV170.Primary,
+                    unfocusedLabelColor = SwarmBrandV170.Muted,
+                    focusedLabelColor = SwarmBrandV170.Primary
                 )
             )
 
@@ -478,19 +482,19 @@ fun LoginPortalScreen(onAuthSuccess: (String) -> Unit) {
                     ) {
                         Text(
                             if (isPasswordVisible) "HIDE" else "SHOW",
-                            color = Color(0xFF03DAC5),
+                            color = SwarmBrandV170.Primary,
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Bold
                         )
                     }
                 },
                 colors = OutlinedTextFieldDefaults.colors(
-                    focusedTextColor = Color.White,
-                    unfocusedTextColor = Color.White,
-                    cursorColor = Color.White,
-                    focusedBorderColor = Color(0xFF03DAC5),
-                    unfocusedLabelColor = Color.Gray,
-                    focusedLabelColor = Color.White
+                    focusedTextColor = SwarmBrandV170.Text,
+                    unfocusedTextColor = SwarmBrandV170.Text,
+                    cursorColor = SwarmBrandV170.Primary,
+                    focusedBorderColor = SwarmBrandV170.Primary,
+                    unfocusedLabelColor = SwarmBrandV170.Muted,
+                    focusedLabelColor = SwarmBrandV170.Primary
                 )
             )
         } else {
@@ -501,12 +505,12 @@ fun LoginPortalScreen(onAuthSuccess: (String) -> Unit) {
                 modifier = Modifier.fillMaxWidth(),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 colors = OutlinedTextFieldDefaults.colors(
-                    focusedTextColor = Color.White,
-                    unfocusedTextColor = Color.White,
-                    cursorColor = Color.White,
-                    focusedBorderColor = Color(0xFF10B981),
-                    unfocusedLabelColor = Color.Gray,
-                    focusedLabelColor = Color.White
+                    focusedTextColor = SwarmBrandV170.Text,
+                    unfocusedTextColor = SwarmBrandV170.Text,
+                    cursorColor = SwarmBrandV170.Primary,
+                    focusedBorderColor = SwarmBrandV170.Emerald,
+                    unfocusedLabelColor = SwarmBrandV170.Muted,
+                    focusedLabelColor = SwarmBrandV170.Primary
                 )
             )
         }
@@ -573,7 +577,7 @@ fun LoginPortalScreen(onAuthSuccess: (String) -> Unit) {
                 .height(56.dp),
             shape = RoundedCornerShape(8.dp),
             colors = ButtonDefaults.buttonColors(
-                containerColor = if (isMfaRequired) Color(0xFF10B981) else Color(0xFF4F46E5)
+                containerColor = if (isMfaRequired) SwarmBrandV170.Emerald else SwarmBrandV170.Primary
             )
         ) {
             Text(
@@ -582,7 +586,7 @@ fun LoginPortalScreen(onAuthSuccess: (String) -> Unit) {
                 } else if (isMfaRequired) {
                     "VERIFY SECURE TOKEN"
                 } else {
-                    "SIGN IN TO EDGESWARM"
+                    "SIGN IN TO SWARM"
                 },
                 fontWeight = FontWeight.Bold
             )
@@ -599,7 +603,7 @@ fun LoginPortalScreen(onAuthSuccess: (String) -> Unit) {
                 ) {
                     Color.Red
                 } else {
-                    Color(0xFF00FFCC)
+                    SwarmBrandV170.Primary
                 },
                 fontSize = 13.sp,
                 textAlign = TextAlign.Center
@@ -626,12 +630,12 @@ fun LedgeScreen(userEmail: String) {
             "BLOCKCHAIN LEDGE",
             fontSize = 20.sp,
             fontWeight = FontWeight.Bold,
-            color = Color(0xFF03DAC5)
+            color = SwarmBrandV170.Primary
         )
 
         Text(
             "Verified EdgeSwarm rewards and proof records.",
-            color = Color.Gray,
+            color = SwarmBrandV170.Muted,
             fontSize = 12.sp
         )
 
@@ -656,7 +660,7 @@ fun LedgeScreen(userEmail: String) {
                 .fillMaxWidth()
                 .height(56.dp),
             shape = RoundedCornerShape(8.dp),
-            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E2329))
+            colors = ButtonDefaults.buttonColors(containerColor = SwarmBrandV170.Primary)
         ) {
             Text(
                 if (isRefreshing) "FETCHING..." else "REFRESH LEDGE",
@@ -666,7 +670,7 @@ fun LedgeScreen(userEmail: String) {
 
         if (statusText.isNotEmpty()) {
             Spacer(modifier = Modifier.height(12.dp))
-            Text(statusText, color = Color.Gray, fontSize = 12.sp)
+            Text(statusText, color = SwarmBrandV170.Muted, fontSize = 12.sp)
         }
 
         Spacer(modifier = Modifier.height(24.dp))
@@ -675,7 +679,7 @@ fun LedgeScreen(userEmail: String) {
             "RECENT REWARD ACTIVITY",
             fontSize = 12.sp,
             fontWeight = FontWeight.Bold,
-            color = Color.Gray
+            color = SwarmBrandV170.Muted
         )
 
         Spacer(modifier = Modifier.height(16.dp))
@@ -698,7 +702,7 @@ fun LedgeScreen(userEmail: String) {
                                 Modifier
                             }
                         ),
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFF161A1E))
+                    colors = CardDefaults.cardColors(containerColor = SwarmBrandV170.Surface)
                 ) {
                     Row(
                         modifier = Modifier
@@ -710,20 +714,20 @@ fun LedgeScreen(userEmail: String) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
                                 "Task ${item.taskId}",
-                                color = Color.White,
+                                color = SwarmBrandV170.Text,
                                 fontWeight = FontWeight.Bold
                             )
 
                             Text(
                                 "Node: ${shortAddress(item.worker)}",
-                                color = Color.Gray,
+                                color = SwarmBrandV170.Muted,
                                 fontSize = 11.sp
                             )
 
                             if (proofUrl != null) {
                                 Text(
                                     "Base proof: ${shortAddress(item.txHash)}",
-                                    color = Color.Gray,
+                                    color = SwarmBrandV170.Muted,
                                     fontSize = 11.sp
                                 )
                             }
@@ -732,7 +736,7 @@ fun LedgeScreen(userEmail: String) {
                         Column(horizontalAlignment = Alignment.End) {
                             Text(
                                 item.score,
-                                color = Color(0xFF00FFCC),
+                                color = SwarmBrandV170.Primary,
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.Bold
                             )
@@ -752,7 +756,7 @@ fun LedgeScreen(userEmail: String) {
                                 ) {
                                     Text(
                                         "VIEW PROOF",
-                                        color = Color(0xFF03DAC5),
+                                        color = SwarmBrandV170.Primary,
                                         fontSize = 10.sp,
                                         fontWeight = FontWeight.Bold
                                     )
@@ -760,7 +764,7 @@ fun LedgeScreen(userEmail: String) {
                             } else {
                                 Text(
                                     "PROOF PENDING",
-                                    color = Color.Gray,
+                                    color = SwarmBrandV170.Muted,
                                     fontSize = 9.sp,
                                     fontWeight = FontWeight.Bold
                                 )
@@ -903,7 +907,7 @@ fun TokenDashboard(
     ) {
         Text(
             "PROVIDER EARNINGS",
-            color = Color.Gray,
+            color = SwarmBrandV170.Muted,
             fontSize = 12.sp,
             fontWeight = FontWeight.Bold
         )
@@ -912,13 +916,13 @@ fun TokenDashboard(
             text = if (isSyncing) "SYNCING..." else "\$$earningsUsd USD",
             fontSize = 48.sp,
             fontWeight = FontWeight.Black,
-            color = Color.White,
+            color = SwarmBrandV170.Text,
             textAlign = TextAlign.Center
         )
 
         Text(
             text = "Verified provider earnings",
-            color = Color(0xFF00FFCC),
+            color = SwarmBrandV170.Primary,
             fontSize = 18.sp
         )
 
@@ -926,7 +930,7 @@ fun TokenDashboard(
 
         Text(
             text = "Pre-market reference conversion. Not a live market price.",
-            color = Color.Gray,
+            color = SwarmBrandV170.Muted,
             fontSize = 11.sp,
             textAlign = TextAlign.Center
         )
@@ -939,7 +943,7 @@ fun TokenDashboard(
                 .fillMaxWidth()
                 .height(56.dp),
             shape = RoundedCornerShape(8.dp),
-            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E2329))
+            colors = ButtonDefaults.buttonColors(containerColor = SwarmBrandV170.Primary)
         ) {
             Text(
                 if (isSyncing) "SYNCING..." else "SYNC LEDGER DATA",
@@ -1572,16 +1576,16 @@ fun SentinelScreen(
     }
 
     val swarmPurple =
-        Color(0xFF6754E8)
+        SwarmBrandV170.Primary
 
     val swarmBackground =
-        Color(0xFFF7F7FA)
+        SwarmBrandV170.Background
 
     val swarmText =
-        Color(0xFF202027)
+        SwarmBrandV170.Text
 
     val swarmMuted =
-        Color(0xFF6F6F7A)
+        SwarmBrandV170.Muted
 
     val nodeStatus =
         when {
@@ -1806,9 +1810,16 @@ fun SentinelScreen(
                 verticalAlignment =
                     Alignment.CenterVertically
             ) {
-                Column {
-                    Text(
-                        text = "Swarm",
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Image(
+                        painter = painterResource(R.drawable.swarm_brand_logo_v170),
+                        contentDescription = "Swarm logo",
+                        modifier = Modifier.size(48.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Column {
+                        Text(
+                            text = "Swarm",
                         color = swarmText,
                         fontSize = 26.sp,
                         fontWeight =
@@ -1822,6 +1833,7 @@ fun SentinelScreen(
                             swarmMuted,
                         fontSize = 13.sp
                     )
+                    }
                 }
 
                 Text(
@@ -2612,7 +2624,7 @@ private fun SwarmStatusPill(
                 Color(0xFFEDEDF1)
 
             awake ->
-                Color(0xFFEDE9FF)
+                SwarmBrandV170.SoftGreen
 
             else ->
                 Color(0xFFE6F6EE)
@@ -2621,10 +2633,10 @@ private fun SwarmStatusPill(
     val foreground =
         when {
             !enabled ->
-                Color(0xFF6F6F7A)
+                SwarmBrandV170.Muted
 
             awake ->
-                Color(0xFF6754E8)
+                SwarmBrandV170.Primary
 
             else ->
                 Color(0xFF197A55)
@@ -2688,7 +2700,7 @@ private fun SwarmMetricCard(
                 text =
                     title,
                 color =
-                    Color(0xFF6F6F7A),
+                    SwarmBrandV170.Muted,
                 fontSize =
                     11.sp,
                 fontWeight =
@@ -2706,7 +2718,7 @@ private fun SwarmMetricCard(
                 text =
                     value,
                 color =
-                    Color(0xFF202027),
+                    SwarmBrandV170.Text,
                 fontSize =
                     18.sp,
                 fontWeight =
@@ -2724,7 +2736,7 @@ private fun SwarmMetricCard(
                 text =
                     detail,
                 color =
-                    Color(0xFF8A8A94),
+                    SwarmBrandV170.Muted,
                 fontSize =
                     10.sp
             )
@@ -2767,7 +2779,7 @@ private fun SwarmSectionCard(
                 text =
                     title,
                 color =
-                    Color(0xFF202027),
+                    SwarmBrandV170.Text,
                 fontSize =
                     16.sp,
                 fontWeight =
@@ -2778,7 +2790,7 @@ private fun SwarmSectionCard(
                 text =
                     subtitle,
                 color =
-                    Color(0xFF777781),
+                    SwarmBrandV170.Muted,
                 fontSize =
                     11.sp
             )
@@ -2810,7 +2822,7 @@ private fun SwarmInfoRow(
             text =
                 label,
             color =
-                Color(0xFF777781),
+                SwarmBrandV170.Muted,
             fontSize =
                 12.sp
         )
@@ -2826,7 +2838,7 @@ private fun SwarmInfoRow(
             text =
                 value,
             color =
-                Color(0xFF202027),
+                SwarmBrandV170.Text,
             fontSize =
                 12.sp,
             fontWeight =
@@ -2869,7 +2881,7 @@ private fun SwarmRoutingSwitchRow(
                 text =
                     title,
                 color =
-                    Color(0xFF202027),
+                    SwarmBrandV170.Text,
                 fontSize =
                     13.sp,
                 fontWeight =
@@ -2880,7 +2892,7 @@ private fun SwarmRoutingSwitchRow(
                 text =
                     subtitle,
                 color =
-                    Color(0xFF777781),
+                    SwarmBrandV170.Muted,
                 fontSize =
                     10.sp
             )
@@ -2912,14 +2924,14 @@ private fun RoutingSwitchRow(
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 title,
-                color = Color.White,
+                color = SwarmBrandV170.Text,
                 fontWeight = FontWeight.Bold,
                 fontSize = 14.sp
             )
 
             Text(
                 subtitle,
-                color = Color.Gray,
+                color = SwarmBrandV170.Muted,
                 fontSize = 11.sp
             )
         }
@@ -2929,10 +2941,10 @@ private fun RoutingSwitchRow(
             enabled = enabled,
             onCheckedChange = onCheckedChange,
             colors = SwitchDefaults.colors(
-                checkedThumbColor = Color(0xFF0B0E11),
-                checkedTrackColor = Color(0xFF03DAC5),
-                disabledCheckedThumbColor = Color(0xFF0B0E11),
-                disabledCheckedTrackColor = Color(0xFF03DAC5)
+                checkedThumbColor = SwarmBrandV170.Background,
+                checkedTrackColor = SwarmBrandV170.Primary,
+                disabledCheckedThumbColor = SwarmBrandV170.Background,
+                disabledCheckedTrackColor = SwarmBrandV170.Primary
             )
         )
     }
@@ -3064,16 +3076,16 @@ private fun AndroidUpdateStatusCard(
     }
 
     val statusColor = when {
-        updateRequired -> Color(0xFFFF6B6B)
-        updateAvailable -> Color(0xFFFFB020)
-        error != null -> Color(0xFFFFB020)
-        loading -> Color.Gray
-        else -> Color(0xFF00FFCC)
+        updateRequired -> Color(0xFFB42318)
+        updateAvailable -> Color(0xFF946200)
+        error != null -> Color(0xFF946200)
+        loading -> SwarmBrandV170.Muted
+        else -> SwarmBrandV170.Primary
     }
 
     Card(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF11161A)),
+        colors = CardDefaults.cardColors(containerColor = SwarmBrandV170.Surface),
         shape = RoundedCornerShape(10.dp)
     ) {
         Column(modifier = Modifier.padding(14.dp)) {
@@ -3081,28 +3093,28 @@ private fun AndroidUpdateStatusCard(
                 "ANDROID RELEASE CHECK",
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Bold,
-                color = Color.Gray
+                color = SwarmBrandV170.Muted
             )
 
             Spacer(modifier = Modifier.height(8.dp))
 
             Text(
                 text = "Current version: v$currentVersion",
-                color = Color.White,
+                color = SwarmBrandV170.Text,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Medium
             )
 
             Text(
                 text = "Latest version: ${if (latestVersion.isBlank()) "Unknown" else "v$latestVersion"}",
-                color = Color.Gray,
+                color = SwarmBrandV170.Muted,
                 fontSize = 12.sp,
                 modifier = Modifier.padding(top = 3.dp)
             )
 
             Text(
                 text = "Minimum required: ${if (minimumVersion.isBlank()) "Unknown" else "v$minimumVersion"}",
-                color = Color.Gray,
+                color = SwarmBrandV170.Muted,
                 fontSize = 12.sp,
                 modifier = Modifier.padding(top = 3.dp)
             )
@@ -3118,7 +3130,7 @@ private fun AndroidUpdateStatusCard(
             if (!error.isNullOrBlank()) {
                 Text(
                     text = error,
-                    color = Color(0xFFFFB020),
+                    color = Color(0xFF946200),
                     fontSize = 11.sp,
                     modifier = Modifier.padding(top = 6.dp)
                 )
@@ -3131,11 +3143,11 @@ private fun AndroidUpdateStatusCard(
                     onClick = onDownload,
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(8.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF03DAC5))
+                    colors = ButtonDefaults.buttonColors(containerColor = SwarmBrandV170.Primary)
                 ) {
                     Text(
                         if (updateRequired) "DOWNLOAD REQUIRED UPDATE" else "DOWNLOAD LATEST APK",
-                        color = Color.Black,
+                        color = Color.White,
                         fontWeight = FontWeight.Bold
                     )
                 }
@@ -3143,7 +3155,7 @@ private fun AndroidUpdateStatusCard(
                 if (!releaseInfo?.sha256.isNullOrBlank()) {
                     Text(
                         text = "SHA256: ${releaseInfo?.sha256}",
-                        color = Color.Gray,
+                        color = SwarmBrandV170.Muted,
                         fontSize = 9.sp,
                         modifier = Modifier.padding(top = 6.dp)
                     )
